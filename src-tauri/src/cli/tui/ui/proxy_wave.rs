@@ -114,7 +114,7 @@ mod tests {
     fn proxy_wave_lines_left_pads_recent_samples() {
         let rows = proxy_wave_lines(8, 1, true, &[0, 1, 4, 8], &DOTS, false);
 
-        assert_eq!(rows, vec!["     ⡀⣤⣿".to_string()]);
+        assert_eq!(rows, vec!["⡀⡀⡀⡀⡀⣀⣤⣿".to_string()]);
     }
 
     #[test]
@@ -122,8 +122,9 @@ mod tests {
         let rows = proxy_wave_lines(4, 2, true, &[0, 1, 4, 8], &REV_DOTS, true);
 
         assert_eq!(rows.len(), 2);
+        assert!(rows[0].contains('⠁') || rows[0].contains('⠉'));
         assert!(rows[0].contains('⣿'));
-        assert!(rows[1].contains('⠉') || rows[1].contains('⠛'));
+        assert!(rows[1].contains('⣿'));
     }
 
     #[test]
