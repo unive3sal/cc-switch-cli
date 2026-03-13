@@ -121,6 +121,9 @@ curl -fsSL https://github.com/SaladDay/cc-switch-cli/releases/latest/download/in
 
 默认安装到 `~/.local/bin`。设置 `CC_SWITCH_INSTALL_DIR` 可自定义安装目录。
 
+- 如果目标文件已存在，安装脚本会在 TTY 中提示确认；在非交互环境中，只有设置 `CC_SWITCH_FORCE=1` 才会覆盖。
+- Linux 如需 glibc 构建，可设置 `CC_SWITCH_LINUX_LIBC=glibc`。
+
 <details>
 <summary>手动安装</summary>
 

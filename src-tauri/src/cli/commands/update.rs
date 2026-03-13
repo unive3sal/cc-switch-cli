@@ -1,8 +1,10 @@
 use clap::Args;
 use flate2::read::GzDecoder;
+use minisign_verify::{PublicKey, Signature};
 use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,9 +18,11 @@ use crate::error::AppError;
 const REPO_URL: &str = env!("CARGO_PKG_REPOSITORY");
 const BINARY_NAME: &str = "cc-switch";
 const CHECKSUMS_FILE_NAME: &str = "checksums.txt";
+const LATEST_MANIFEST_FILE_NAME: &str = "latest.json";
 const HTTP_REQUEST_TIMEOUT_SECS: u64 = 30;
 const MAX_RELEASE_ASSET_SIZE_BYTES: u64 = 100 * 1024 * 1024;
 const GITHUB_API_ACCEPT: &str = "application/vnd.github+json";
+const UPDATER_PUBLIC_KEY: &str = include_str!("../../../updater/minisign.pub");
 const USER_AGENT: &str = concat!(
     env!("CARGO_PKG_NAME"),
     "-updater/",
@@ -37,19 +41,88 @@ struct DownloadedAsset {
     archive_path: PathBuf,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
+struct UpdateManifest {
+    version: String,
+    #[serde(default)]
+    notes: Option<String>,
+    #[serde(default)]
+    pub_date: Option<String>,
+    platforms: BTreeMap<String, UpdatePlatformEntry>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct UpdatePlatformEntry {
+    url: String,
+    signature: String,
+    #[serde(default)]
+    variants: BTreeMap<String, UpdatePlatformVariant>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct UpdatePlatformVariant {
+    url: String,
+    signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManifestAsset {
+    url: String,
+    signature: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LinuxLibcPreference {
+    Auto,
+    Musl,
+    Glibc,
+}
+
+#[derive(Debug, Deserialize, Clone)]
 struct ReleaseInfo {
     tag_name: String,
     #[serde(default)]
     assets: Vec<ReleaseAsset>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct ReleaseAsset {
     name: String,
     browser_download_url: String,
     #[serde(default)]
     digest: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+enum ResolvedRelease {
+    Manifest {
+        target_tag: String,
+        manifest: UpdateManifest,
+    },
+    Legacy {
+        target_tag: String,
+        release: ReleaseInfo,
+    },
+}
+
+#[derive(Debug)]
+enum ManifestFetchError {
+    NotFound,
+    Invalid(AppError),
+}
+
+impl From<AppError> for ManifestFetchError {
+    fn from(value: AppError) -> Self {
+        Self::Invalid(value)
+    }
+}
+
+impl ResolvedRelease {
+    fn target_tag(&self) -> &str {
+        match self {
+            Self::Manifest { target_tag, .. } | Self::Legacy { target_tag, .. } => target_tag,
+        }
+    }
 }
 
 pub fn execute(cmd: UpdateCommand) -> Result<(), AppError> {
@@ -61,7 +134,8 @@ async fn execute_async(cmd: UpdateCommand) -> Result<(), AppError> {
     let current_version = env!("CARGO_PKG_VERSION");
     let explicit_version = cmd.version.as_deref().is_some_and(|v| !v.trim().is_empty());
     let client = create_http_client()?;
-    let target_tag = resolve_target_tag(&client, cmd.version.as_deref()).await?;
+    let release = resolve_target_release(&client, REPO_URL, cmd.version.as_deref()).await?;
+    let target_tag = release.target_tag().to_string();
     let target_version = target_tag.trim_start_matches('v');
 
     if target_version == current_version {
@@ -82,41 +156,59 @@ async fn execute_async(cmd: UpdateCommand) -> Result<(), AppError> {
         return Ok(());
     }
 
-    let expected_asset_name = release_asset_name()?;
-    let release = fetch_release_by_tag(&client, REPO_URL, &target_tag).await?;
-    let release_asset = select_release_asset(&release.assets, &target_tag, &expected_asset_name)
-        .ok_or_else(|| {
-            AppError::Message(format!(
-                "Release {target_tag} does not include expected asset '{expected_asset_name}' (or compatible tagged variant)."
-            ))
-        })?;
-    let checksum_url = release_checksums_url(REPO_URL, &target_tag)?;
-    let download_url = release_asset.browser_download_url.as_str();
-
     println!(
         "{}",
         highlight(&format!("Current version: v{current_version}"))
     );
     println!("{}", highlight(&format!("Updating to: {target_tag}")));
-    println!("{}", info(&format!("Downloading: {download_url}")));
-    if release_asset.digest.is_some() {
-        println!(
-            "{}",
-            info("Verifying checksum from release metadata digest.")
-        );
-    } else {
-        println!("{}", info(&format!("Verifying checksum: {checksum_url}")));
-    }
 
-    let downloaded_asset =
-        download_release_asset(&client, download_url, release_asset.name.as_str(), None).await?;
-    verify_asset_checksum(
-        &client,
-        &downloaded_asset.archive_path,
-        &target_tag,
-        release_asset,
-    )
-    .await?;
+    let downloaded_asset = match release {
+        ResolvedRelease::Manifest { manifest, .. } => {
+            let asset = select_current_manifest_asset(&manifest)?;
+            println!("{}", info(&format!("Downloading: {}", asset.url)));
+            println!("{}", info("Verifying updater signature."));
+            let (downloaded_asset, _) =
+                download_manifest_release_asset(&client, &manifest, None).await?;
+            downloaded_asset
+        }
+        ResolvedRelease::Legacy {
+            target_tag,
+            release,
+        } => {
+            let expected_asset_names = current_release_asset_candidates()?;
+            let release_asset = select_release_asset_from_candidates(
+                &release.assets,
+                &target_tag,
+                &expected_asset_names,
+            )
+            .ok_or_else(|| {
+                AppError::Message(format!(
+                    "Release {target_tag} does not include any expected assets {:?} (or compatible tagged variants).",
+                    expected_asset_names
+                ))
+            })?;
+            let checksum_url = release_checksums_url(REPO_URL, &target_tag)?;
+            println!(
+                "{}",
+                info(&format!(
+                    "Downloading: {}",
+                    release_asset.browser_download_url.as_str()
+                ))
+            );
+            if release_asset.digest.is_some() {
+                println!(
+                    "{}",
+                    info("Verifying checksum from release metadata digest.")
+                );
+            } else {
+                println!("{}", info(&format!("Verifying checksum: {checksum_url}")));
+            }
+            let (downloaded_asset, _) =
+                download_legacy_release_asset(&client, &target_tag, Some(&release), None).await?;
+            downloaded_asset
+        }
+    };
+
     let extracted_binary = extract_binary(&downloaded_asset.archive_path)?;
     replace_current_binary(&extracted_binary)?;
 
@@ -143,6 +235,420 @@ fn create_http_client() -> Result<reqwest::Client, AppError> {
         .timeout(std::time::Duration::from_secs(HTTP_REQUEST_TIMEOUT_SECS))
         .build()
         .map_err(|e| AppError::Message(format!("Failed to initialize HTTP client: {e}")))
+}
+
+fn update_manifest_url(repo_url: &str, tag: Option<&str>) -> Result<Url, AppError> {
+    match tag {
+        Some(tag) => release_page_url(
+            repo_url,
+            &format!("download/{tag}/{LATEST_MANIFEST_FILE_NAME}"),
+        ),
+        None => release_page_url(
+            repo_url,
+            &format!("latest/download/{LATEST_MANIFEST_FILE_NAME}"),
+        ),
+    }
+}
+
+async fn fetch_update_manifest(
+    client: &reqwest::Client,
+    repo_url: &str,
+    tag: Option<&str>,
+) -> Result<UpdateManifest, ManifestFetchError> {
+    let url = update_manifest_url(repo_url, tag)?;
+    let response = client
+        .get(url)
+        .header(reqwest::header::USER_AGENT, USER_AGENT)
+        .send()
+        .await
+        .map_err(|e| {
+            ManifestFetchError::Invalid(AppError::Message(format!(
+                "Failed to query update manifest: {e}"
+            )))
+        })?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(ManifestFetchError::NotFound);
+    }
+
+    response
+        .error_for_status()
+        .map_err(|e| {
+            ManifestFetchError::Invalid(AppError::Message(format!(
+                "Update manifest returned error: {e}"
+            )))
+        })?
+        .json::<UpdateManifest>()
+        .await
+        .map_err(|e| {
+            ManifestFetchError::Invalid(AppError::Message(format!(
+                "Failed to parse update manifest: {e}"
+            )))
+        })
+}
+
+fn manifest_target_tag(manifest: &UpdateManifest) -> Result<String, AppError> {
+    let tag = normalize_tag(manifest.version.trim());
+    validate_target_tag(&tag)?;
+    Ok(tag)
+}
+
+fn validate_requested_manifest_tag(
+    manifest: &UpdateManifest,
+    requested_tag: &str,
+) -> Result<(), AppError> {
+    let manifest_tag = manifest_target_tag(manifest)?;
+    if manifest_tag != requested_tag {
+        return Err(AppError::Message(format!(
+            "Update manifest version {manifest_tag} does not match requested version {requested_tag}."
+        )));
+    }
+    Ok(())
+}
+
+fn current_platform_key() -> Result<&'static str, AppError> {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+
+    match (os, arch) {
+        ("macos", "x86_64") => Ok("darwin-x86_64"),
+        ("macos", "aarch64") => Ok("darwin-aarch64"),
+        ("linux", "x86_64") => Ok("linux-x86_64"),
+        ("linux", "aarch64") => Ok("linux-aarch64"),
+        ("windows", "x86_64") => Ok("windows-x86_64"),
+        _ => Err(AppError::Message(format!(
+            "Self-update is not supported for platform {os}/{arch}."
+        ))),
+    }
+}
+
+fn linux_libc_preference() -> Result<LinuxLibcPreference, AppError> {
+    let raw = std::env::var("CC_SWITCH_LINUX_LIBC").unwrap_or_else(|_| "auto".to_string());
+    match raw.trim() {
+        "" | "auto" | "AUTO" => Ok(LinuxLibcPreference::Auto),
+        "musl" | "MUSL" => Ok(LinuxLibcPreference::Musl),
+        "glibc" | "GLIBC" | "gnu" | "GNU" => Ok(LinuxLibcPreference::Glibc),
+        other => Err(AppError::Message(format!(
+            "Unsupported CC_SWITCH_LINUX_LIBC='{other}'. Expected auto, musl, or glibc."
+        ))),
+    }
+}
+
+fn push_manifest_asset(candidates: &mut Vec<ManifestAsset>, asset: ManifestAsset) {
+    if !candidates.contains(&asset) {
+        candidates.push(asset);
+    }
+}
+
+fn asset_looks_like_musl(url: &str) -> bool {
+    url.contains("-musl")
+}
+
+fn select_manifest_asset(
+    manifest: &UpdateManifest,
+    platform_key: &str,
+    preference: LinuxLibcPreference,
+) -> Result<ManifestAsset, AppError> {
+    manifest_asset_candidates(manifest, platform_key, preference)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            AppError::Message("Update manifest does not contain a usable asset.".to_string())
+        })
+}
+
+fn manifest_asset_candidates(
+    manifest: &UpdateManifest,
+    platform_key: &str,
+    preference: LinuxLibcPreference,
+) -> Result<Vec<ManifestAsset>, AppError> {
+    let entry = manifest.platforms.get(platform_key).ok_or_else(|| {
+        AppError::Message(format!(
+            "Update manifest does not provide platform entry '{platform_key}'."
+        ))
+    })?;
+
+    let primary = ManifestAsset {
+        url: entry.url.clone(),
+        signature: entry.signature.clone(),
+    };
+
+    if !platform_key.starts_with("linux-") {
+        return Ok(vec![primary]);
+    }
+
+    let musl_variant = entry.variants.get("musl").map(|variant| ManifestAsset {
+        url: variant.url.clone(),
+        signature: variant.signature.clone(),
+    });
+    let glibc_variant = entry.variants.get("glibc").map(|variant| ManifestAsset {
+        url: variant.url.clone(),
+        signature: variant.signature.clone(),
+    });
+
+    let mut candidates = Vec::new();
+    match preference {
+        LinuxLibcPreference::Auto => {
+            push_manifest_asset(&mut candidates, primary);
+            if let Some(asset) = glibc_variant {
+                push_manifest_asset(&mut candidates, asset);
+            }
+            if let Some(asset) = musl_variant {
+                push_manifest_asset(&mut candidates, asset);
+            }
+        }
+        LinuxLibcPreference::Musl => {
+            if let Some(asset) = musl_variant {
+                push_manifest_asset(&mut candidates, asset);
+            } else if asset_looks_like_musl(&primary.url) {
+                push_manifest_asset(&mut candidates, primary.clone());
+            } else {
+                return Err(AppError::Message(format!(
+                    "Update manifest does not provide a musl variant for platform '{platform_key}'."
+                )));
+            }
+        }
+        LinuxLibcPreference::Glibc => {
+            if let Some(asset) = glibc_variant {
+                push_manifest_asset(&mut candidates, asset);
+            } else if !asset_looks_like_musl(&primary.url) {
+                push_manifest_asset(&mut candidates, primary.clone());
+            } else {
+                return Err(AppError::Message(format!(
+                    "Update manifest does not provide a glibc variant for platform '{platform_key}'."
+                )));
+            }
+            push_manifest_asset(&mut candidates, primary);
+            if let Some(asset) = musl_variant {
+                push_manifest_asset(&mut candidates, asset);
+            }
+        }
+    }
+
+    Ok(candidates)
+}
+
+fn select_current_manifest_asset(manifest: &UpdateManifest) -> Result<ManifestAsset, AppError> {
+    select_manifest_asset(manifest, current_platform_key()?, linux_libc_preference()?)
+}
+
+fn release_asset_candidates_for_platform(
+    os: &str,
+    arch: &str,
+    preference: LinuxLibcPreference,
+) -> Result<Vec<String>, AppError> {
+    let names = match (os, arch) {
+        ("macos", "x86_64") => vec![
+            "cc-switch-cli-darwin-universal.tar.gz".to_string(),
+            "cc-switch-cli-darwin-x64.tar.gz".to_string(),
+        ],
+        ("macos", "aarch64") => vec![
+            "cc-switch-cli-darwin-universal.tar.gz".to_string(),
+            "cc-switch-cli-darwin-arm64.tar.gz".to_string(),
+        ],
+        ("linux", "x86_64") => match preference {
+            LinuxLibcPreference::Auto => vec![
+                "cc-switch-cli-linux-x64-musl.tar.gz".to_string(),
+                "cc-switch-cli-linux-x64.tar.gz".to_string(),
+            ],
+            LinuxLibcPreference::Musl => vec!["cc-switch-cli-linux-x64-musl.tar.gz".to_string()],
+            LinuxLibcPreference::Glibc => vec![
+                "cc-switch-cli-linux-x64.tar.gz".to_string(),
+                "cc-switch-cli-linux-x64-musl.tar.gz".to_string(),
+            ],
+        },
+        ("linux", "aarch64") => match preference {
+            LinuxLibcPreference::Auto => vec![
+                "cc-switch-cli-linux-arm64-musl.tar.gz".to_string(),
+                "cc-switch-cli-linux-arm64.tar.gz".to_string(),
+            ],
+            LinuxLibcPreference::Musl => {
+                vec!["cc-switch-cli-linux-arm64-musl.tar.gz".to_string()]
+            }
+            LinuxLibcPreference::Glibc => vec![
+                "cc-switch-cli-linux-arm64.tar.gz".to_string(),
+                "cc-switch-cli-linux-arm64-musl.tar.gz".to_string(),
+            ],
+        },
+        ("windows", "x86_64") => vec!["cc-switch-cli-windows-x64.zip".to_string()],
+        _ => {
+            return Err(AppError::Message(format!(
+                "Self-update is not supported for platform {os}/{arch}."
+            )))
+        }
+    };
+
+    Ok(names)
+}
+
+fn current_release_asset_candidates() -> Result<Vec<String>, AppError> {
+    release_asset_candidates_for_platform(
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        linux_libc_preference()?,
+    )
+}
+
+fn select_release_asset_from_candidates<'a>(
+    assets: &'a [ReleaseAsset],
+    target_tag: &str,
+    expected_asset_names: &[String],
+) -> Option<&'a ReleaseAsset> {
+    expected_asset_names.iter().find_map(|expected_asset_name| {
+        select_release_asset(assets, target_tag, expected_asset_name)
+    })
+}
+
+fn parse_public_key(public_key_text: &str) -> Result<PublicKey, AppError> {
+    PublicKey::decode(public_key_text.trim())
+        .or_else(|_| PublicKey::from_base64(public_key_text.trim()))
+        .map_err(|e| AppError::Message(format!("Invalid updater public key: {e}")))
+}
+
+fn verify_minisign_signature(
+    payload: &[u8],
+    signature_text: &str,
+    public_key_text: &str,
+) -> Result<(), AppError> {
+    let public_key = parse_public_key(public_key_text)?;
+    let signature = Signature::decode(signature_text.trim())
+        .map_err(|e| AppError::Message(format!("Invalid updater signature: {e}")))?;
+    public_key
+        .verify(payload, &signature, false)
+        .map_err(|e| AppError::Message(format!("Updater signature verification failed: {e}")))
+}
+
+fn verify_downloaded_asset_signature(
+    archive_path: &Path,
+    signature_text: &str,
+) -> Result<(), AppError> {
+    let payload = fs::read(archive_path).map_err(|e| AppError::io(archive_path, e))?;
+    verify_minisign_signature(&payload, signature_text, UPDATER_PUBLIC_KEY)
+}
+
+fn asset_name_from_url(url: &str) -> Result<String, AppError> {
+    let parsed = Url::parse(url)
+        .map_err(|e| AppError::Message(format!("Invalid asset URL '{url}': {e}")))?;
+    let asset_name = parsed
+        .path_segments()
+        .and_then(|segments| segments.last())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| AppError::Message(format!("Asset URL has no file name: {url}")))?;
+
+    sanitized_asset_file_name(asset_name).map(str::to_string)
+}
+
+async fn download_manifest_release_asset(
+    client: &reqwest::Client,
+    manifest: &UpdateManifest,
+    on_progress: Option<&dyn Fn(u64, Option<u64>)>,
+) -> Result<(DownloadedAsset, ManifestAsset), AppError> {
+    let assets =
+        manifest_asset_candidates(manifest, current_platform_key()?, linux_libc_preference()?)?;
+    let mut last_error = None;
+
+    for asset in assets {
+        let asset_name = asset_name_from_url(&asset.url)?;
+        match download_release_asset(client, &asset.url, &asset_name, on_progress).await {
+            Ok(downloaded_asset) => {
+                verify_downloaded_asset_signature(
+                    &downloaded_asset.archive_path,
+                    &asset.signature,
+                )?;
+                return Ok((downloaded_asset, asset));
+            }
+            Err(err) => last_error = Some(err),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        AppError::Message("Update manifest did not produce a downloadable asset.".to_string())
+    }))
+}
+
+async fn download_legacy_release_asset(
+    client: &reqwest::Client,
+    target_tag: &str,
+    release: Option<&ReleaseInfo>,
+    on_progress: Option<&dyn Fn(u64, Option<u64>)>,
+) -> Result<(DownloadedAsset, ReleaseAsset), AppError> {
+    let release = match release {
+        Some(release) => release.clone(),
+        None => fetch_release_by_tag(client, REPO_URL, target_tag).await?,
+    };
+    let expected_asset_names = current_release_asset_candidates()?;
+    let release_asset = select_release_asset_from_candidates(
+        &release.assets,
+        target_tag,
+        &expected_asset_names,
+    )
+        .ok_or_else(|| {
+            AppError::Message(format!(
+                "Release {target_tag} does not include any expected assets {:?} (or compatible tagged variants).",
+                expected_asset_names
+            ))
+        })?
+        .clone();
+    let downloaded_asset = download_release_asset(
+        client,
+        release_asset.browser_download_url.as_str(),
+        release_asset.name.as_str(),
+        on_progress,
+    )
+    .await?;
+    verify_asset_checksum(
+        client,
+        &downloaded_asset.archive_path,
+        target_tag,
+        &release_asset,
+    )
+    .await?;
+    Ok((downloaded_asset, release_asset))
+}
+
+async fn resolve_target_release(
+    client: &reqwest::Client,
+    repo_url: &str,
+    version: Option<&str>,
+) -> Result<ResolvedRelease, AppError> {
+    if let Some(version) = version.map(str::trim).filter(|value| !value.is_empty()) {
+        let target_tag = normalize_tag(version);
+        validate_target_tag(&target_tag)?;
+
+        match fetch_update_manifest(client, repo_url, Some(&target_tag)).await {
+            Ok(manifest) => {
+                validate_requested_manifest_tag(&manifest, &target_tag)?;
+                return Ok(ResolvedRelease::Manifest {
+                    target_tag,
+                    manifest,
+                });
+            }
+            Err(ManifestFetchError::NotFound) => {}
+            Err(ManifestFetchError::Invalid(err)) => return Err(err),
+        }
+
+        return Ok(ResolvedRelease::Legacy {
+            target_tag: target_tag.clone(),
+            release: fetch_release_by_tag(client, repo_url, &target_tag).await?,
+        });
+    }
+
+    match fetch_update_manifest(client, repo_url, None).await {
+        Ok(manifest) => {
+            return Ok(ResolvedRelease::Manifest {
+                target_tag: manifest_target_tag(&manifest)?,
+                manifest,
+            });
+        }
+        Err(ManifestFetchError::NotFound) => {}
+        Err(ManifestFetchError::Invalid(err)) => return Err(err),
+    }
+
+    let target_tag = fetch_latest_release_tag(client, repo_url).await?;
+    Ok(ResolvedRelease::Legacy {
+        target_tag: target_tag.clone(),
+        release: fetch_release_by_tag(client, repo_url, &target_tag).await?,
+    })
 }
 
 async fn resolve_target_tag(
@@ -377,25 +883,6 @@ fn select_release_asset<'a>(
     expected_names
         .iter()
         .find_map(|expected_name| assets.iter().find(|asset| asset.name == *expected_name))
-}
-
-fn release_asset_name() -> Result<String, AppError> {
-    let os = std::env::consts::OS;
-    let arch = std::env::consts::ARCH;
-
-    let name = match (os, arch) {
-        ("macos", "x86_64") | ("macos", "aarch64") => "cc-switch-cli-darwin-universal.tar.gz",
-        ("linux", "x86_64") => "cc-switch-cli-linux-x64-musl.tar.gz",
-        ("linux", "aarch64") => "cc-switch-cli-linux-arm64-musl.tar.gz",
-        ("windows", "x86_64") => "cc-switch-cli-windows-x64.zip",
-        _ => {
-            return Err(AppError::Message(format!(
-                "Self-update is not supported for platform {os}/{arch}."
-            )));
-        }
-    };
-
-    Ok(name.to_string())
 }
 
 async fn download_release_asset(
@@ -760,7 +1247,10 @@ pub(crate) struct UpdateCheckInfo {
 pub(crate) async fn check_for_update() -> Result<UpdateCheckInfo, AppError> {
     let current_version = env!("CARGO_PKG_VERSION");
     let client = create_http_client()?;
-    let target_tag = resolve_target_tag(&client, None).await?;
+    let target_tag = resolve_target_release(&client, REPO_URL, None)
+        .await?
+        .target_tag()
+        .to_string();
     let target_version = target_tag.trim_start_matches('v');
 
     let is_already_latest = target_version == current_version;
@@ -779,28 +1269,27 @@ pub(crate) async fn download_and_apply(
     on_progress: impl Fn(u64, Option<u64>),
 ) -> Result<(), AppError> {
     let client = create_http_client()?;
-    let expected_asset_name = release_asset_name()?;
-    let release = fetch_release_by_tag(&client, REPO_URL, target_tag).await?;
-    let release_asset = select_release_asset(&release.assets, target_tag, &expected_asset_name)
-        .ok_or_else(|| {
-            AppError::Message(format!(
-                "Release {target_tag} does not include expected asset '{expected_asset_name}' (or compatible tagged variant)."
-            ))
-        })?;
-    let downloaded_asset = download_release_asset(
-        &client,
-        release_asset.browser_download_url.as_str(),
-        release_asset.name.as_str(),
-        Some(&on_progress),
-    )
-    .await?;
-    verify_asset_checksum(
-        &client,
-        &downloaded_asset.archive_path,
-        target_tag,
-        release_asset,
-    )
-    .await?;
+    let release = resolve_target_release(&client, REPO_URL, Some(target_tag)).await?;
+    let downloaded_asset = match release {
+        ResolvedRelease::Manifest { manifest, .. } => {
+            let (downloaded_asset, _) =
+                download_manifest_release_asset(&client, &manifest, Some(&on_progress)).await?;
+            downloaded_asset
+        }
+        ResolvedRelease::Legacy {
+            target_tag,
+            release,
+        } => {
+            let (downloaded_asset, _) = download_legacy_release_asset(
+                &client,
+                &target_tag,
+                Some(&release),
+                Some(&on_progress),
+            )
+            .await?;
+            downloaded_asset
+        }
+    };
     let extracted_binary = extract_binary(&downloaded_asset.archive_path)?;
     replace_current_binary(&extracted_binary)?;
 
@@ -811,6 +1300,9 @@ pub(crate) async fn download_and_apply(
 mod tests {
     use super::*;
     use axum::{response::Redirect, routing::get, Router};
+    use minisign::KeyPair;
+    use std::collections::BTreeMap;
+    use std::io::Cursor;
     use tokio::net::TcpListener;
 
     #[test]
@@ -1084,5 +1576,306 @@ mod tests {
         )
         .expect_err("size over limit should fail");
         assert!(err.to_string().contains("too large"));
+    }
+
+    #[test]
+    fn select_manifest_asset_prefers_linux_glibc_variant_when_overridden() {
+        let manifest = UpdateManifest {
+            version: "v4.6.3".to_string(),
+            notes: None,
+            pub_date: None,
+            platforms: BTreeMap::from([(
+                "linux-x86_64".to_string(),
+                UpdatePlatformEntry {
+                    url: "https://example.com/cc-switch-cli-linux-x64-musl.tar.gz".to_string(),
+                    signature: "musl-signature".to_string(),
+                    variants: BTreeMap::from([(
+                        "glibc".to_string(),
+                        UpdatePlatformVariant {
+                            url: "https://example.com/cc-switch-cli-linux-x64.tar.gz".to_string(),
+                            signature: "glibc-signature".to_string(),
+                        },
+                    )]),
+                },
+            )]),
+        };
+
+        let asset = select_manifest_asset(&manifest, "linux-x86_64", LinuxLibcPreference::Glibc)
+            .expect("glibc variant should be selected");
+
+        assert_eq!(
+            asset.url,
+            "https://example.com/cc-switch-cli-linux-x64.tar.gz"
+        );
+        assert_eq!(asset.signature, "glibc-signature");
+    }
+
+    #[test]
+    fn select_manifest_asset_accepts_glibc_primary_entry_without_variant() {
+        let manifest = UpdateManifest {
+            version: "v4.6.3".to_string(),
+            notes: None,
+            pub_date: None,
+            platforms: BTreeMap::from([(
+                "linux-x86_64".to_string(),
+                UpdatePlatformEntry {
+                    url: "https://example.com/glibc.tar.gz".to_string(),
+                    signature: "glibc-signature".to_string(),
+                    variants: BTreeMap::new(),
+                },
+            )]),
+        };
+
+        let asset = select_manifest_asset(&manifest, "linux-x86_64", LinuxLibcPreference::Glibc)
+            .expect("glibc primary entry should be accepted");
+
+        assert_eq!(asset.url, "https://example.com/glibc.tar.gz");
+    }
+
+    #[test]
+    fn manifest_linux_asset_candidates_keep_musl_strict_when_forced() {
+        let manifest = UpdateManifest {
+            version: "v4.6.3".to_string(),
+            notes: None,
+            pub_date: None,
+            platforms: BTreeMap::from([(
+                "linux-x86_64".to_string(),
+                UpdatePlatformEntry {
+                    url: "https://example.com/cc-switch-cli-linux-x64-musl.tar.gz".to_string(),
+                    signature: "musl-signature".to_string(),
+                    variants: BTreeMap::from([(
+                        "glibc".to_string(),
+                        UpdatePlatformVariant {
+                            url: "https://example.com/cc-switch-cli-linux-x64.tar.gz".to_string(),
+                            signature: "glibc-signature".to_string(),
+                        },
+                    )]),
+                },
+            )]),
+        };
+
+        let candidates =
+            manifest_asset_candidates(&manifest, "linux-x86_64", LinuxLibcPreference::Musl)
+                .expect("musl candidates should resolve");
+
+        assert_eq!(
+            candidates,
+            vec![ManifestAsset {
+                url: "https://example.com/cc-switch-cli-linux-x64-musl.tar.gz".to_string(),
+                signature: "musl-signature".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn legacy_linux_asset_candidates_follow_glibc_override() {
+        let candidates =
+            release_asset_candidates_for_platform("linux", "x86_64", LinuxLibcPreference::Glibc)
+                .expect("glibc candidates should resolve");
+
+        assert_eq!(
+            candidates,
+            vec![
+                "cc-switch-cli-linux-x64.tar.gz".to_string(),
+                "cc-switch-cli-linux-x64-musl.tar.gz".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn legacy_linux_asset_candidates_keep_musl_strict_when_forced() {
+        let candidates =
+            release_asset_candidates_for_platform("linux", "x86_64", LinuxLibcPreference::Musl)
+                .expect("musl candidates should resolve");
+
+        assert_eq!(
+            candidates,
+            vec!["cc-switch-cli-linux-x64-musl.tar.gz".to_string(),]
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_update_manifest_reads_latest_json_without_release_api() {
+        let platform_key = current_platform_key().expect("platform key should resolve");
+        let manifest = serde_json::json!({
+            "version": "v4.6.3",
+            "notes": "manifest path",
+            "pub_date": "2026-03-14T00:00:00Z",
+            "platforms": {
+                platform_key: {
+                    "url": "https://example.com/cc-switch.tar.gz",
+                    "signature": "fake-signature"
+                }
+            }
+        });
+
+        let app = Router::new().route(
+            "/team/cc-switch-cli/releases/latest/download/latest.json",
+            get(move || {
+                let manifest = manifest.clone();
+                async move { axum::Json(manifest) }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("server should run");
+        });
+
+        let client = create_http_client().expect("http client should initialize");
+        let repo_url = format!("http://{addr}/team/cc-switch-cli");
+        let manifest = fetch_update_manifest(&client, &repo_url, None)
+            .await
+            .expect("latest manifest should resolve");
+        assert_eq!(manifest.version, "v4.6.3");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn resolve_target_release_rejects_manifest_version_mismatch_for_explicit_version() {
+        let platform_key = current_platform_key().expect("platform key should resolve");
+        let manifest = serde_json::json!({
+            "version": "v4.6.4",
+            "platforms": {
+                platform_key: {
+                    "url": "https://example.com/cc-switch.tar.gz",
+                    "signature": "fake-signature"
+                }
+            }
+        });
+
+        let app = Router::new().route(
+            "/team/cc-switch-cli/releases/download/v4.6.3/latest.json",
+            get(move || {
+                let manifest = manifest.clone();
+                async move { axum::Json(manifest) }
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("server should run");
+        });
+
+        let client = create_http_client().expect("http client should initialize");
+        let repo_url = format!("http://{addr}/team/cc-switch-cli");
+        let err = resolve_target_release(&client, &repo_url, Some("v4.6.3"))
+            .await
+            .expect_err("mismatched manifest version must fail");
+        assert!(err.to_string().contains("does not match requested version"));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn resolve_target_release_falls_back_only_when_manifest_is_missing() {
+        let app = Router::new()
+            .route(
+                "/team/cc-switch-cli/releases/latest/download/latest.json",
+                get(|| async { axum::http::StatusCode::NOT_FOUND }),
+            )
+            .route(
+                "/api/v3/repos/team/cc-switch-cli/releases/latest",
+                get(|| async {
+                    axum::Json(serde_json::json!({
+                        "tag_name": "v4.6.3",
+                        "assets": []
+                    }))
+                }),
+            )
+            .route(
+                "/api/v3/repos/team/cc-switch-cli/releases/tags/v4.6.3",
+                get(|| async {
+                    axum::Json(serde_json::json!({
+                        "tag_name": "v4.6.3",
+                        "assets": []
+                    }))
+                }),
+            );
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("server should run");
+        });
+
+        let client = create_http_client().expect("http client should initialize");
+        let repo_url = format!("http://{addr}/team/cc-switch-cli");
+        let release = resolve_target_release(&client, &repo_url, None)
+            .await
+            .expect("404 manifest should fall back to legacy release");
+        assert!(matches!(
+            release,
+            ResolvedRelease::Legacy { ref target_tag, .. } if target_tag == "v4.6.3"
+        ));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn resolve_target_release_does_not_fallback_when_manifest_is_invalid() {
+        let app = Router::new()
+            .route(
+                "/team/cc-switch-cli/releases/latest/download/latest.json",
+                get(|| async { "not-json" }),
+            )
+            .route(
+                "/api/v3/repos/team/cc-switch-cli/releases/latest",
+                get(|| async {
+                    axum::Json(serde_json::json!({
+                        "tag_name": "v4.6.3",
+                        "assets": []
+                    }))
+                }),
+            )
+            .route(
+                "/api/v3/repos/team/cc-switch-cli/releases/tags/v4.6.3",
+                get(|| async {
+                    axum::Json(serde_json::json!({
+                        "tag_name": "v4.6.3",
+                        "assets": []
+                    }))
+                }),
+            );
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener should bind");
+        let addr = listener.local_addr().expect("local addr should resolve");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("server should run");
+        });
+
+        let client = create_http_client().expect("http client should initialize");
+        let repo_url = format!("http://{addr}/team/cc-switch-cli");
+        let err = resolve_target_release(&client, &repo_url, None)
+            .await
+            .expect_err("invalid manifest should not fall back to legacy release");
+        assert!(err.to_string().contains("Failed to parse update manifest"));
+
+        server.abort();
+    }
+
+    #[test]
+    fn verify_minisign_signature_accepts_valid_signature() {
+        let payload = br#"{"version":"v4.6.3"}"#;
+        let KeyPair { pk, sk } =
+            KeyPair::generate_unencrypted_keypair().expect("key pair should generate");
+        let signature = minisign::sign(None, &sk, Cursor::new(payload), None, None)
+            .expect("payload should sign")
+            .to_string();
+        let public_key = pk.to_box().expect("public key box").to_string();
+
+        verify_minisign_signature(payload, &signature, &public_key)
+            .expect("signature should verify");
     }
 }
