@@ -53,6 +53,10 @@ pub enum Action {
     ProviderSwitch {
         id: String,
     },
+    ProviderSwitchForce {
+        id: String,
+    },
+    ProviderImportLiveConfig,
     ProviderDelete {
         id: String,
     },
@@ -265,6 +269,7 @@ pub struct App {
     pub filter: FilterState,
     pub editor: Option<EditorState>,
     pub form: Option<FormState>,
+    pub pending_overlay: Option<Overlay>,
     pub overlay: Overlay,
     pub toast: Option<Toast>,
     pub should_quit: bool,

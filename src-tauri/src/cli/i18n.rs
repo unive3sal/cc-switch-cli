@@ -1342,6 +1342,74 @@ pub mod texts {
         }
     }
 
+    pub fn tui_provider_switch_first_use_title() -> &'static str {
+        if is_chinese() {
+            "已有 Claude 配置"
+        } else {
+            "Existing Claude Config"
+        }
+    }
+
+    pub fn tui_provider_switch_first_use_message(path: &str) -> String {
+        if is_chinese() {
+            format!(
+                "⚠ 检测到已有 Claude 配置文件 ({path})。\n切换供应商将覆盖此文件。\n建议先将当前配置导入为供应商。"
+            )
+        } else {
+            format!(
+                "WARNING: An existing Claude config file was found at {path}.\nSwitching providers will overwrite this file.\nImport the current config as a provider first if you want to keep it."
+            )
+        }
+    }
+
+    pub fn tui_provider_switch_first_use_import_button() -> &'static str {
+        if is_chinese() {
+            "导入为供应商"
+        } else {
+            "Import As Provider"
+        }
+    }
+
+    pub fn tui_provider_switch_first_use_continue_button() -> &'static str {
+        if is_chinese() {
+            "继续切换"
+        } else {
+            "Continue Switch"
+        }
+    }
+
+    pub fn tui_provider_switch_first_use_cancel_button() -> &'static str {
+        if is_chinese() {
+            "取消"
+        } else {
+            "Cancel"
+        }
+    }
+
+    pub fn tui_provider_switch_shared_config_tip_title() -> &'static str {
+        if is_chinese() {
+            "💡 通用配置提示"
+        } else {
+            "Shared Config Tip"
+        }
+    }
+
+    pub fn tui_provider_switch_shared_config_tip_message() -> String {
+        if is_chinese() {
+            "如果有些配置（如 permissions、plugins）需要所有供应商共享，\n可在“通用配置”中设置，切换时会自动合并。".to_string()
+        } else {
+            "If some settings, such as permissions or plugins, should be shared by every provider,\nset them in Common Config and they will be merged automatically when switching.".to_string()
+        }
+    }
+
+    pub fn tui_provider_imported_live_config_name() -> &'static str {
+        if is_chinese() {
+            "已导入的当前配置"
+        } else {
+            "Imported Current Config"
+        }
+    }
+
     pub fn tui_claude_api_format_popup_title() -> &'static str {
         if is_chinese() {
             "API 格式"
@@ -3689,6 +3757,14 @@ pub mod texts {
             "供应商已删除。"
         } else {
             "Provider deleted."
+        }
+    }
+
+    pub fn tui_toast_provider_live_config_imported() -> &'static str {
+        if is_chinese() {
+            "已将当前 Claude 配置导入为供应商。"
+        } else {
+            "Imported the current Claude config as a provider."
         }
     }
 

@@ -68,6 +68,7 @@ pub enum ConfirmAction {
     SettingsSetSkipClaudeOnboarding { enabled: bool },
     SettingsSetClaudePluginIntegration { enabled: bool },
     ProviderApiFormatProxyNotice,
+    ProviderSwitchSharedConfigNotice,
     EditorDiscard,
     EditorSaveBeforeClose,
     WebDavMigrateV1ToV2,
@@ -138,6 +139,11 @@ pub enum Overlay {
     None,
     Help,
     Confirm(ConfirmOverlay),
+    ProviderSwitchFirstUseConfirm {
+        provider_id: String,
+        live_config_path: String,
+        selected: usize,
+    },
     TextInput(TextInputState),
     BackupPicker {
         selected: usize,
