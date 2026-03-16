@@ -83,6 +83,13 @@ fn known_ansi256_terminal() -> bool {
         .unwrap_or(false)
 }
 
+fn ssh_plain_xterm_prefers_ansi256() -> bool {
+    std::env::var_os("SSH_TTY").is_some()
+        && std::env::var("TERM")
+            .map(|value| value.eq_ignore_ascii_case("xterm"))
+            .unwrap_or(false)
+}
+
 fn detected_color_mode() -> ColorMode {
     if no_color() {
         return ColorMode::NoColor;
@@ -101,6 +108,10 @@ fn detected_color_mode() -> ColorMode {
     }
 
     if env_supports_ansi256("TERM") {
+        return ColorMode::Ansi256;
+    }
+
+    if ssh_plain_xterm_prefers_ansi256() {
         return ColorMode::Ansi256;
     }
 
@@ -322,6 +333,78 @@ mod tests {
         assert_eq!(detected_color_mode(), ColorMode::Ansi256);
         assert_eq!(theme.accent, Color::Indexed(rgb_to_ansi256(139, 233, 253)));
         assert_eq!(theme.surface, Color::Indexed(rgb_to_ansi256(68, 71, 90)));
+        assert!(!theme.no_color);
+    }
+
+    #[test]
+    fn theme_uses_ansi256_for_plain_xterm_over_ssh_without_truecolor_signal() {
+        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _no_color = EnvGuard::remove("NO_COLOR");
+        let _color_mode = EnvGuard::remove("CC_SWITCH_COLOR_MODE");
+        let _colorterm = EnvGuard::remove("COLORTERM");
+        let _term = EnvGuard::set("TERM", "xterm");
+        let _term_program = EnvGuard::remove("TERM_PROGRAM");
+        let _ssh_tty = EnvGuard::set("SSH_TTY", "/dev/pts/0");
+
+        let theme = theme_for(&AppType::Claude);
+
+        assert_eq!(detected_color_mode(), ColorMode::Ansi256);
+        assert_eq!(theme.accent, Color::Indexed(rgb_to_ansi256(139, 233, 253)));
+        assert_eq!(theme.surface, Color::Indexed(rgb_to_ansi256(68, 71, 90)));
+        assert!(!theme.no_color);
+    }
+
+    #[test]
+    fn theme_keeps_truecolor_for_plain_xterm_without_ssh_signal() {
+        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _no_color = EnvGuard::remove("NO_COLOR");
+        let _color_mode = EnvGuard::remove("CC_SWITCH_COLOR_MODE");
+        let _colorterm = EnvGuard::remove("COLORTERM");
+        let _term = EnvGuard::set("TERM", "xterm");
+        let _term_program = EnvGuard::remove("TERM_PROGRAM");
+        let _ssh_tty = EnvGuard::remove("SSH_TTY");
+
+        let theme = theme_for(&AppType::Claude);
+
+        assert_eq!(detected_color_mode(), ColorMode::TrueColor);
+        assert_eq!(theme.accent, Color::Rgb(139, 233, 253));
+        assert_eq!(theme.surface, Color::Rgb(68, 71, 90));
+        assert!(!theme.no_color);
+    }
+
+    #[test]
+    fn theme_keeps_truecolor_for_plain_xterm_over_ssh_with_explicit_truecolor_signal() {
+        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _no_color = EnvGuard::remove("NO_COLOR");
+        let _color_mode = EnvGuard::remove("CC_SWITCH_COLOR_MODE");
+        let _colorterm = EnvGuard::set("COLORTERM", "truecolor");
+        let _term = EnvGuard::set("TERM", "xterm");
+        let _term_program = EnvGuard::remove("TERM_PROGRAM");
+        let _ssh_tty = EnvGuard::set("SSH_TTY", "/dev/pts/0");
+
+        let theme = theme_for(&AppType::Claude);
+
+        assert_eq!(detected_color_mode(), ColorMode::TrueColor);
+        assert_eq!(theme.accent, Color::Rgb(139, 233, 253));
+        assert_eq!(theme.surface, Color::Rgb(68, 71, 90));
+        assert!(!theme.no_color);
+    }
+
+    #[test]
+    fn theme_keeps_truecolor_for_term_direct_over_ssh() {
+        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _no_color = EnvGuard::remove("NO_COLOR");
+        let _color_mode = EnvGuard::remove("CC_SWITCH_COLOR_MODE");
+        let _colorterm = EnvGuard::remove("COLORTERM");
+        let _term = EnvGuard::set("TERM", "xterm-direct");
+        let _term_program = EnvGuard::remove("TERM_PROGRAM");
+        let _ssh_tty = EnvGuard::set("SSH_TTY", "/dev/pts/0");
+
+        let theme = theme_for(&AppType::Claude);
+
+        assert_eq!(detected_color_mode(), ColorMode::TrueColor);
+        assert_eq!(theme.accent, Color::Rgb(139, 233, 253));
+        assert_eq!(theme.surface, Color::Rgb(68, 71, 90));
         assert!(!theme.no_color);
     }
 
