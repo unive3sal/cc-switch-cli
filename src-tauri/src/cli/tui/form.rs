@@ -14,6 +14,9 @@ mod tests;
 #[cfg(test)]
 pub(crate) use provider_json::strip_provider_internal_fields;
 
+pub(crate) use provider_json::strip_common_config_from_settings;
+pub(crate) use provider_state::resolve_provider_id_for_submit;
+
 pub const OPENCLAW_DEFAULT_API_PROTOCOL: &str = "openai-completions";
 pub const OPENCLAW_DEFAULT_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0";

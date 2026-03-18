@@ -117,7 +117,23 @@ impl ProviderAddFormState {
     }
 
     pub fn has_required_fields(&self) -> bool {
-        !self.id.is_blank() && !self.name.is_blank()
+        !self.name.is_blank()
+    }
+
+    pub fn ensure_generated_id(&mut self, existing_ids: &[String]) -> bool {
+        let Some(generated_id) = resolve_provider_id_for_submit(
+            self.name.value.as_str(),
+            self.id.value.as_str(),
+            existing_ids,
+        ) else {
+            return false;
+        };
+
+        if self.id.is_blank() {
+            self.id.set(generated_id);
+        }
+
+        true
     }
 
     pub fn fields(&self) -> Vec<ProviderAddField> {
@@ -530,4 +546,22 @@ impl ProviderAddFormState {
         settings_obj.insert("models".to_string(), models_value);
         self.apply_provider_json_value_to_fields(provider_value)
     }
+}
+
+pub(crate) fn resolve_provider_id_for_submit(
+    name: &str,
+    id: &str,
+    existing_ids: &[String],
+) -> Option<String> {
+    if name.trim().is_empty() {
+        return None;
+    }
+
+    if !id.trim().is_empty() {
+        return Some(id.to_string());
+    }
+
+    let generated_id =
+        crate::cli::commands::provider_input::generate_provider_id(name.trim(), existing_ids);
+    (!generated_id.trim().is_empty()).then_some(generated_id)
 }

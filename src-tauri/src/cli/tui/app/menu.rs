@@ -15,6 +15,7 @@ impl App {
             filter: FilterState::new(),
             editor: None,
             form: None,
+            pending_overlay: None,
             overlay: Overlay::None,
             toast: None,
             should_quit: false,
@@ -202,11 +203,14 @@ impl App {
     }
 
     pub fn close_overlay(&mut self) {
-        self.overlay = Overlay::None;
+        self.overlay = self.pending_overlay.take().unwrap_or(Overlay::None);
     }
 
     pub fn on_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
         self.clamp_selections(data);
+        if !self.overlay.is_active() {
+            self.pending_overlay = None;
+        }
 
         if key.modifiers.contains(KeyModifiers::CONTROL) && matches!(key.code, KeyCode::Char('c')) {
             self.should_quit = true;

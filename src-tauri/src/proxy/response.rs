@@ -7,6 +7,11 @@ use std::{
     time::Duration,
 };
 
+mod error_summary;
+#[cfg(test)]
+mod tests;
+
+use self::error_summary::{summarize_upstream_body_bytes, summarize_upstream_json_value};
 use super::{
     error::ProxyError,
     metrics::estimate_tokens_from_bytes,
@@ -20,14 +25,23 @@ pub struct PreparedResponse {
     pub response: Response,
     pub stream_completion: Option<StreamCompletion>,
     pub estimated_output_tokens: u64,
+    pub upstream_error_summary: Option<String>,
+    pub body_bytes: Option<Bytes>,
 }
 
 impl PreparedResponse {
-    fn buffered(response: Response, estimated_output_tokens: u64) -> Self {
+    fn buffered(
+        response: Response,
+        estimated_output_tokens: u64,
+        upstream_error_summary: Option<String>,
+        body_bytes: Bytes,
+    ) -> Self {
         Self {
             response,
             stream_completion: None,
             estimated_output_tokens,
+            upstream_error_summary,
+            body_bytes: Some(body_bytes),
         }
     }
 
@@ -36,6 +50,8 @@ impl PreparedResponse {
             response,
             stream_completion: Some(stream_completion),
             estimated_output_tokens: 0,
+            upstream_error_summary: None,
+            body_bytes: None,
         }
     }
 }
@@ -101,10 +117,23 @@ pub async fn build_passthrough_response(
     }
 
     let body = read_buffered_body(response, first_byte_timeout).await?;
+    let upstream_error_summary = if !status.is_success() {
+        summarize_upstream_body_bytes(&body)
+    } else {
+        None
+    };
     let estimated_output_tokens = estimate_tokens_from_bytes(&body);
+    let response_bytes = body.clone();
     builder
         .body(Body::from(body))
-        .map(|response| PreparedResponse::buffered(response, estimated_output_tokens))
+        .map(|response| {
+            PreparedResponse::buffered(
+                response,
+                estimated_output_tokens,
+                upstream_error_summary,
+                response_bytes,
+            )
+        })
         .map_err(|error| {
             ProxyError::RequestFailed(format!("build passthrough response failed: {error}"))
         })
@@ -112,6 +141,7 @@ pub async fn build_passthrough_response(
 
 pub async fn build_json_response<F>(
     response: reqwest::Response,
+    first_byte_timeout: Option<Duration>,
     transform: F,
 ) -> Result<PreparedResponse, ProxyError>
 where
@@ -119,25 +149,8 @@ where
 {
     let status = response.status();
     let headers = response.headers().clone();
-    let upstream_body: Value = response.json().await.map_err(|error| {
-        ProxyError::RequestFailed(format!("parse upstream json failed: {error}"))
-    })?;
-    let response_body = transform(upstream_body)?;
-    let response_body = serde_json::to_vec(&response_body).map_err(|error| {
-        ProxyError::RequestFailed(format!("serialize transformed json failed: {error}"))
-    })?;
-    let estimated_output_tokens = estimate_tokens_from_bytes(&response_body);
-
-    let mut builder = Response::builder().status(status);
-    copy_headers(&mut builder, &headers, false);
-    builder = builder.header("content-type", "application/json");
-
-    builder
-        .body(Body::from(response_body))
-        .map(|response| PreparedResponse::buffered(response, estimated_output_tokens))
-        .map_err(|error| {
-            ProxyError::RequestFailed(format!("build transformed response failed: {error}"))
-        })
+    let body = read_buffered_body(response, first_byte_timeout).await?;
+    build_buffered_json_response_inner(status, &headers, body, transform)
 }
 
 pub fn build_buffered_passthrough_response(
@@ -145,12 +158,25 @@ pub fn build_buffered_passthrough_response(
     headers: &reqwest::header::HeaderMap,
     body: Bytes,
 ) -> Result<PreparedResponse, ProxyError> {
+    let upstream_error_summary = if !status.is_success() {
+        summarize_upstream_body_bytes(&body)
+    } else {
+        None
+    };
     let estimated_output_tokens = estimate_tokens_from_bytes(&body);
     let mut builder = Response::builder().status(status);
     copy_headers(&mut builder, headers, false);
+    let response_bytes = body.clone();
     builder
         .body(Body::from(body))
-        .map(|response| PreparedResponse::buffered(response, estimated_output_tokens))
+        .map(|response| {
+            PreparedResponse::buffered(
+                response,
+                estimated_output_tokens,
+                upstream_error_summary,
+                response_bytes,
+            )
+        })
         .map_err(|error| {
             ProxyError::RequestFailed(format!("build passthrough response failed: {error}"))
         })
@@ -165,25 +191,7 @@ pub fn build_buffered_json_response<F>(
 where
     F: FnOnce(Value) -> Result<Value, ProxyError>,
 {
-    let upstream_body: Value = serde_json::from_slice(&body).map_err(|error| {
-        ProxyError::RequestFailed(format!("parse upstream json failed: {error}"))
-    })?;
-    let response_body = transform(upstream_body)?;
-    let response_body = serde_json::to_vec(&response_body).map_err(|error| {
-        ProxyError::RequestFailed(format!("serialize transformed json failed: {error}"))
-    })?;
-    let estimated_output_tokens = estimate_tokens_from_bytes(&response_body);
-
-    let mut builder = Response::builder().status(status);
-    copy_headers(&mut builder, headers, false);
-    builder = builder.header("content-type", "application/json");
-
-    builder
-        .body(Body::from(response_body))
-        .map(|response| PreparedResponse::buffered(response, estimated_output_tokens))
-        .map_err(|error| {
-            ProxyError::RequestFailed(format!("build transformed response failed: {error}"))
-        })
+    build_buffered_json_response_inner(status, headers, body, transform)
 }
 
 pub fn build_anthropic_stream_response(
@@ -274,7 +282,7 @@ async fn read_buffered_body(
             Ok(result) => result.map_err(|error| {
                 ProxyError::RequestFailed(format!("read response body failed: {error}"))
             }),
-            Err(_) => Err(ProxyError::RequestFailed(
+            Err(_) => Err(ProxyError::Timeout(
                 StreamTimeoutPhase::FirstByte.error_message(timeout),
             )),
         },
@@ -346,5 +354,97 @@ fn copy_headers(
 
     if force_sse_content_type {
         *builder = std::mem::take(builder).header("content-type", "text/event-stream");
+    }
+}
+
+fn build_buffered_json_response_inner<F>(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    body: Bytes,
+    transform: F,
+) -> Result<PreparedResponse, ProxyError>
+where
+    F: FnOnce(Value) -> Result<Value, ProxyError>,
+{
+    let upstream_body: Value = match serde_json::from_slice(&body) {
+        Ok(body) => body,
+        Err(_) if !status.is_success() => {
+            return build_buffered_passthrough_response(status, headers, body);
+        }
+        Err(error) => {
+            return Err(ProxyError::RequestFailed(format!(
+                "parse upstream json failed: {error}"
+            )));
+        }
+    };
+    let upstream_error_summary = if !status.is_success() {
+        summarize_upstream_json_value(&upstream_body)
+    } else {
+        None
+    };
+    let response_body = match transform(upstream_body) {
+        Ok(body) => body,
+        Err(error) if should_passthrough_transform_failure(status, &error) => {
+            return build_buffered_passthrough_response(status, headers, body);
+        }
+        Err(error) => {
+            if !status.is_success() {
+                return Err(error);
+            }
+            return Err(ProxyError::RequestFailed(format!(
+                "transform upstream json failed: {}",
+                proxy_error_message(error)
+            )));
+        }
+    };
+    let response_body = match serde_json::to_vec(&response_body) {
+        Ok(body) => body,
+        Err(error) => {
+            return Err(ProxyError::RequestFailed(format!(
+                "serialize transformed json failed: {error}"
+            )));
+        }
+    };
+    let response_bytes = Bytes::from(response_body);
+    let estimated_output_tokens = estimate_tokens_from_bytes(&response_bytes);
+
+    let mut builder = Response::builder().status(status);
+    copy_headers(&mut builder, headers, false);
+    builder = builder.header("content-type", "application/json");
+
+    builder
+        .body(Body::from(response_bytes.clone()))
+        .map(|response| {
+            PreparedResponse::buffered(
+                response,
+                estimated_output_tokens,
+                upstream_error_summary,
+                response_bytes,
+            )
+        })
+        .map_err(|error| {
+            ProxyError::RequestFailed(format!("build transformed response failed: {error}"))
+        })
+}
+
+fn should_passthrough_transform_failure(status: reqwest::StatusCode, error: &ProxyError) -> bool {
+    !status.is_success() && matches!(error, ProxyError::TransformError(_))
+}
+
+fn proxy_error_message(error: ProxyError) -> String {
+    match error {
+        ProxyError::ConfigError(message)
+        | ProxyError::AuthError(message)
+        | ProxyError::RequestFailed(message)
+        | ProxyError::TransformError(message)
+        | ProxyError::ForwardFailed(message)
+        | ProxyError::BindFailed(message)
+        | ProxyError::StopFailed(message)
+        | ProxyError::ProviderUnhealthy(message)
+        | ProxyError::DatabaseError(message)
+        | ProxyError::InvalidRequest(message)
+        | ProxyError::Timeout(message)
+        | ProxyError::Internal(message) => message,
+        other => other.to_string(),
     }
 }

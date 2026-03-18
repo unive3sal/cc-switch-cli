@@ -1,7 +1,15 @@
+mod claude;
+mod codex;
+#[cfg(test)]
+mod codex_openai_auth_tests;
+mod common;
 mod endpoints;
+mod gemini;
 mod gemini_auth;
 mod live;
 mod models;
+#[cfg(test)]
+mod tests;
 mod usage;
 
 use indexmap::IndexMap;
@@ -15,11 +23,17 @@ use crate::config::{
     write_json_file,
 };
 use crate::error::AppError;
-use crate::provider::Provider;
+use crate::provider::{Provider, ProviderManager};
 use crate::store::AppState;
 
 use gemini_auth::GeminiAuthType;
 use live::LiveSnapshot;
+
+pub use common::migrate_legacy_codex_config;
+use common::{
+    is_codex_official_provider, merge_json_values, strip_codex_common_config_from_full_text,
+    strip_common_values,
+};
 
 /// 供应商相关业务逻辑
 pub struct ProviderService;
@@ -34,501 +48,6 @@ fn state_from_config(config: MultiAppConfig) -> AppState {
     }
 }
 
-/// Migrate legacy flat Codex config to the upstream `model_provider + [model_providers.<key>]` format.
-///
-/// Legacy configs (pre-v4.7.3) stored fields like `base_url`, `wire_api` at the TOML root level.
-/// Codex requires them under `[model_providers.<key>]`. This function detects the old format
-/// (no `model_provider` key) and rebuilds the config in the correct structure.
-///
-/// Returns `None` if no migration is needed, `Some(new_text)` if migrated.
-pub fn migrate_legacy_codex_config(cfg_text: &str, provider: &Provider) -> Option<String> {
-    let trimmed = cfg_text.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let table: toml::Table = match toml::from_str(trimmed) {
-        Ok(t) => t,
-        Err(_) => return None, // unparseable → leave as-is
-    };
-
-    // Already in new format
-    if table.contains_key("model_provider") {
-        return None;
-    }
-
-    // Detect legacy: root-level base_url or wire_api without model_provider
-    let has_legacy_keys = table.contains_key("base_url") || table.contains_key("wire_api");
-    if !has_legacy_keys {
-        return None;
-    }
-
-    // Extract fields from legacy flat format
-    let base_url = table
-        .get("base_url")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .trim();
-    let model = table
-        .get("model")
-        .and_then(|v| v.as_str())
-        .unwrap_or("gpt-5.2-codex")
-        .trim();
-    let wire_api = table
-        .get("wire_api")
-        .and_then(|v| v.as_str())
-        .unwrap_or("responses")
-        .trim();
-    let requires_openai_auth = table
-        .get("requires_openai_auth")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let env_key = table.get("env_key").and_then(|v| v.as_str());
-
-    // Generate provider key from provider id/name
-    let raw_key = if provider.id.trim().is_empty() {
-        &provider.name
-    } else {
-        &provider.id
-    };
-    let provider_key = crate::codex_config::clean_codex_provider_key(raw_key);
-
-    // Preserve non-provider-specific root keys (model_reasoning_effort, disable_response_storage, etc.)
-    let mut extra_root_lines = Vec::new();
-    for (key, val) in &table {
-        match key.as_str() {
-            "base_url" | "model" | "wire_api" | "requires_openai_auth" | "env_key" | "name" => {
-                continue
-            }
-            _ => {
-                // Re-serialize the value as a TOML line
-                if let Ok(s) = toml::to_string(&toml::Value::Table({
-                    let mut t = toml::Table::new();
-                    t.insert(key.clone(), val.clone());
-                    t
-                })) {
-                    extra_root_lines.push(s.trim().to_string());
-                }
-            }
-        }
-    }
-
-    // Build new format
-    let mut lines = Vec::new();
-    lines.push(format!("model_provider = \"{}\"", provider_key));
-    lines.push(format!("model = \"{}\"", model));
-    lines.extend(extra_root_lines);
-    lines.push(String::new());
-    lines.push(format!("[model_providers.{}]", provider_key));
-    lines.push(format!("name = \"{}\"", provider_key));
-    if !base_url.is_empty() {
-        lines.push(format!("base_url = \"{}\"", base_url));
-    }
-    lines.push(format!("wire_api = \"{}\"", wire_api));
-    if requires_openai_auth {
-        lines.push("requires_openai_auth = true".to_string());
-    } else {
-        lines.push("requires_openai_auth = false".to_string());
-        if let Some(ek) = env_key {
-            let ek = ek.trim();
-            if !ek.is_empty() {
-                lines.push(format!("env_key = \"{}\"", ek));
-            }
-        }
-    }
-    lines.push(String::new());
-
-    log::info!(
-        "Migrated legacy Codex config for provider '{}' to model_provider format",
-        provider.id
-    );
-    Some(lines.join("\n"))
-}
-
-/// Strip common config snippet keys from a full Codex config.toml text.
-///
-/// When storing a provider snapshot, we remove keys that belong to the common
-/// config snippet so they don't get duplicated when the common snippet is
-/// merged back in during `write_codex_live`.
-fn strip_codex_common_config_from_full_text(
-    config_text: &str,
-    common_snippet: &str,
-) -> Result<String, AppError> {
-    if common_snippet.trim().is_empty() || config_text.trim().is_empty() {
-        return Ok(config_text.to_string());
-    }
-
-    let mut target_doc = config_text
-        .parse::<toml_edit::DocumentMut>()
-        .map_err(|e| AppError::Config(format!("TOML parse error: {e}")))?;
-    let source_doc = common_snippet
-        .parse::<toml_edit::DocumentMut>()
-        .map_err(|e| AppError::Config(format!("Common config TOML parse error: {e}")))?;
-
-    remove_toml_table_like(target_doc.as_table_mut(), source_doc.as_table());
-    Ok(target_doc.to_string())
-}
-
-fn strip_codex_synced_mcp_servers_from_full_text(
-    config_text: &str,
-    synced_server_ids: &[String],
-) -> Result<String, AppError> {
-    if synced_server_ids.is_empty() || config_text.trim().is_empty() {
-        return Ok(config_text.to_string());
-    }
-
-    let mut doc = config_text
-        .parse::<toml_edit::DocumentMut>()
-        .map_err(|e| AppError::Config(format!("TOML parse error: {e}")))?;
-
-    let remove_root_mcp_servers = if let Some(mcp_servers) = doc
-        .get_mut("mcp_servers")
-        .and_then(|item| item.as_table_like_mut())
-    {
-        for server_id in synced_server_ids {
-            mcp_servers.remove(server_id);
-        }
-        mcp_servers.is_empty()
-    } else {
-        false
-    };
-
-    if remove_root_mcp_servers {
-        doc.as_table_mut().remove("mcp_servers");
-    }
-
-    Ok(doc.to_string())
-}
-
-fn is_codex_official_provider(provider: &Provider) -> bool {
-    provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.codex_official)
-        .unwrap_or(false)
-        || provider
-            .category
-            .as_deref()
-            .is_some_and(|category| category.eq_ignore_ascii_case("official"))
-        || provider
-            .website_url
-            .as_deref()
-            .is_some_and(|url| url.trim().eq_ignore_ascii_case("https://chatgpt.com/codex"))
-        || provider.name.trim().eq_ignore_ascii_case("OpenAI Official")
-}
-
-fn json_is_subset(target: &Value, source: &Value) -> bool {
-    match source {
-        Value::Object(source_map) => {
-            let Some(target_map) = target.as_object() else {
-                return false;
-            };
-            source_map.iter().all(|(key, source_value)| {
-                target_map
-                    .get(key)
-                    .is_some_and(|target_value| json_is_subset(target_value, source_value))
-            })
-        }
-        Value::Array(source_arr) => {
-            let Some(target_arr) = target.as_array() else {
-                return false;
-            };
-            json_array_contains_subset(target_arr, source_arr)
-        }
-        _ => target == source,
-    }
-}
-
-fn json_array_contains_subset(target_arr: &[Value], source_arr: &[Value]) -> bool {
-    let mut matched = vec![false; target_arr.len()];
-
-    source_arr.iter().all(|source_item| {
-        if let Some((index, _)) = target_arr.iter().enumerate().find(|(index, target_item)| {
-            !matched[*index] && json_is_subset(target_item, source_item)
-        }) {
-            matched[index] = true;
-            true
-        } else {
-            false
-        }
-    })
-}
-
-fn json_remove_array_items(target_arr: &mut Vec<Value>, source_arr: &[Value]) {
-    for source_item in source_arr {
-        if let Some(index) = target_arr
-            .iter()
-            .position(|target_item| json_is_subset(target_item, source_item))
-        {
-            target_arr.remove(index);
-        }
-    }
-}
-
-fn json_deep_remove(target: &mut Value, source: &Value) {
-    let (Some(target_map), Some(source_map)) = (target.as_object_mut(), source.as_object()) else {
-        return;
-    };
-
-    for (key, source_value) in source_map {
-        let mut remove_key = false;
-
-        if let Some(target_value) = target_map.get_mut(key) {
-            if source_value.is_object() && target_value.is_object() {
-                json_deep_remove(target_value, source_value);
-                remove_key = target_value.as_object().is_some_and(|obj| obj.is_empty());
-            } else if let (Some(target_arr), Some(source_arr)) =
-                (target_value.as_array_mut(), source_value.as_array())
-            {
-                json_remove_array_items(target_arr, source_arr);
-                remove_key = target_arr.is_empty();
-            } else if json_is_subset(target_value, source_value) {
-                remove_key = true;
-            }
-        }
-
-        if remove_key {
-            target_map.remove(key);
-        }
-    }
-}
-
-fn toml_value_is_subset(target: &toml_edit::Value, source: &toml_edit::Value) -> bool {
-    match (target, source) {
-        (toml_edit::Value::String(target), toml_edit::Value::String(source)) => {
-            target.value() == source.value()
-        }
-        (toml_edit::Value::Integer(target), toml_edit::Value::Integer(source)) => {
-            target.value() == source.value()
-        }
-        (toml_edit::Value::Float(target), toml_edit::Value::Float(source)) => {
-            target.value() == source.value()
-        }
-        (toml_edit::Value::Boolean(target), toml_edit::Value::Boolean(source)) => {
-            target.value() == source.value()
-        }
-        (toml_edit::Value::Datetime(target), toml_edit::Value::Datetime(source)) => {
-            target.value() == source.value()
-        }
-        (toml_edit::Value::Array(target), toml_edit::Value::Array(source)) => {
-            toml_array_contains_subset(target, source)
-        }
-        (toml_edit::Value::InlineTable(target), toml_edit::Value::InlineTable(source)) => {
-            source.iter().all(|(key, source_item)| {
-                target
-                    .get(key)
-                    .is_some_and(|target_item| toml_value_is_subset(target_item, source_item))
-            })
-        }
-        _ => false,
-    }
-}
-
-fn toml_array_contains_subset(target: &toml_edit::Array, source: &toml_edit::Array) -> bool {
-    let mut matched = vec![false; target.len()];
-    let target_items: Vec<&toml_edit::Value> = target.iter().collect();
-
-    source.iter().all(|source_item| {
-        if let Some((index, _)) = target_items
-            .iter()
-            .enumerate()
-            .find(|(index, target_item)| {
-                !matched[*index] && toml_value_is_subset(target_item, source_item)
-            })
-        {
-            matched[index] = true;
-            true
-        } else {
-            false
-        }
-    })
-}
-
-fn toml_remove_array_items(target: &mut toml_edit::Array, source: &toml_edit::Array) {
-    for source_item in source.iter() {
-        let index = {
-            let target_items: Vec<&toml_edit::Value> = target.iter().collect();
-            target_items
-                .iter()
-                .enumerate()
-                .find(|(_, target_item)| toml_value_is_subset(target_item, source_item))
-                .map(|(index, _)| index)
-        };
-
-        if let Some(index) = index {
-            target.remove(index);
-        }
-    }
-}
-
-fn toml_item_is_subset(target: &toml_edit::Item, source: &toml_edit::Item) -> bool {
-    if let Some(source_table) = source.as_table_like() {
-        let Some(target_table) = target.as_table_like() else {
-            return false;
-        };
-        return source_table.iter().all(|(key, source_item)| {
-            target_table
-                .get(key)
-                .is_some_and(|target_item| toml_item_is_subset(target_item, source_item))
-        });
-    }
-
-    match (target.as_value(), source.as_value()) {
-        (Some(target_value), Some(source_value)) => {
-            toml_value_is_subset(target_value, source_value)
-        }
-        _ => false,
-    }
-}
-
-fn remove_toml_item(target: &mut toml_edit::Item, source: &toml_edit::Item) {
-    if let Some(source_table) = source.as_table_like() {
-        if let Some(target_table) = target.as_table_like_mut() {
-            remove_toml_table_like(target_table, source_table);
-            if target_table.is_empty() {
-                *target = toml_edit::Item::None;
-            }
-            return;
-        }
-    }
-
-    if let Some(source_value) = source.as_value() {
-        let mut remove_item = false;
-
-        if let Some(target_value) = target.as_value_mut() {
-            match (target_value, source_value) {
-                (toml_edit::Value::Array(target_arr), toml_edit::Value::Array(source_arr)) => {
-                    toml_remove_array_items(target_arr, source_arr);
-                    remove_item = target_arr.is_empty();
-                }
-                (target_value, source_value)
-                    if toml_value_is_subset(target_value, source_value) =>
-                {
-                    remove_item = true;
-                }
-                _ => {}
-            }
-        }
-
-        if remove_item {
-            *target = toml_edit::Item::None;
-        }
-    }
-}
-
-fn remove_toml_table_like(
-    target: &mut dyn toml_edit::TableLike,
-    source: &dyn toml_edit::TableLike,
-) {
-    let keys: Vec<String> = source.iter().map(|(key, _)| key.to_string()).collect();
-
-    for key in keys {
-        let mut remove_key = false;
-        if let (Some(target_item), Some(source_item)) = (target.get_mut(&key), source.get(&key)) {
-            remove_toml_item(target_item, source_item);
-            remove_key = target_item.is_none()
-                || target_item
-                    .as_table_like()
-                    .is_some_and(|table_like| table_like.is_empty());
-        }
-
-        if remove_key {
-            target.remove(&key);
-        }
-    }
-}
-
-fn provider_uses_common_config(
-    app_type: &AppType,
-    provider: &Provider,
-    snippet: Option<&str>,
-) -> bool {
-    match provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.apply_common_config)
-    {
-        Some(explicit) => explicit && snippet.is_some_and(|value| !value.trim().is_empty()),
-        None => snippet.is_some_and(|value| {
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                return false;
-            }
-
-            match app_type {
-                AppType::Claude | AppType::Gemini => match serde_json::from_str::<Value>(trimmed) {
-                    Ok(source) if source.is_object() => {
-                        json_is_subset(&provider.settings_config, &source)
-                    }
-                    _ => false,
-                },
-                AppType::Codex => {
-                    let config_toml = provider
-                        .settings_config
-                        .get("config")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default();
-                    if config_toml.trim().is_empty() {
-                        return false;
-                    }
-
-                    let target_doc = match config_toml.parse::<toml_edit::DocumentMut>() {
-                        Ok(doc) => doc,
-                        Err(_) => return false,
-                    };
-                    let source_doc = match trimmed.parse::<toml_edit::DocumentMut>() {
-                        Ok(doc) => doc,
-                        Err(_) => return false,
-                    };
-
-                    toml_item_is_subset(target_doc.as_item(), source_doc.as_item())
-                }
-                AppType::OpenCode | AppType::OpenClaw => false,
-            }
-        }),
-    }
-}
-
-fn preferred_apply_common_config(provider: &Provider) -> bool {
-    provider
-        .meta
-        .as_ref()
-        .and_then(|meta| meta.apply_common_config)
-        .unwrap_or(true)
-}
-
-fn resolve_live_apply_common_config(
-    app_type: &AppType,
-    provider: &Provider,
-    common_config_snippet: Option<&str>,
-    requested_apply_common_config: bool,
-) -> bool {
-    if !requested_apply_common_config {
-        return false;
-    }
-
-    match app_type {
-        AppType::Codex => provider_uses_common_config(app_type, provider, common_config_snippet),
-        AppType::Claude | AppType::Gemini => preferred_apply_common_config(provider),
-        AppType::OpenCode | AppType::OpenClaw => false,
-    }
-}
-
-fn synced_codex_mcp_server_ids(config: &MultiAppConfig) -> Vec<String> {
-    config
-        .mcp
-        .servers
-        .as_ref()
-        .map(|servers| {
-            servers
-                .values()
-                .filter(|server| server.apps.codex)
-                .map(|server| server.id.clone())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-}
-
 #[derive(Clone)]
 struct PostCommitAction {
     app_type: AppType,
@@ -540,2204 +59,25 @@ struct PostCommitAction {
     takeover_active: bool,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{McpApps, McpServer};
-    use serial_test::serial;
-    use std::collections::HashMap;
-    use std::ffi::OsString;
-    use std::path::Path;
-    use tempfile::TempDir;
-
-    struct EnvGuard {
-        old_home: Option<OsString>,
-        old_userprofile: Option<OsString>,
-    }
-
-    impl EnvGuard {
-        fn set_home(home: &Path) -> Self {
-            let old_home = std::env::var_os("HOME");
-            let old_userprofile = std::env::var_os("USERPROFILE");
-            std::env::set_var("HOME", home);
-            std::env::set_var("USERPROFILE", home);
-            Self {
-                old_home,
-                old_userprofile,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.old_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match &self.old_userprofile {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-        }
-    }
-
-    #[test]
-    fn validate_provider_settings_allows_missing_auth_for_codex() {
-        let mut provider = Provider::with_id(
-            "codex".into(),
-            "Codex".into(),
-            json!({ "config": "base_url = \"https://example.com\"" }),
-            None,
-        );
-        provider.meta = Some(crate::provider::ProviderMeta {
-            codex_official: Some(true),
-            ..Default::default()
-        });
-        ProviderService::validate_provider_settings(&AppType::Codex, &provider)
-            .expect("Codex auth is optional for official provider");
-    }
-
-    #[test]
-    fn validate_provider_settings_allows_missing_auth_for_codex_official_by_category() {
-        let mut provider = Provider::with_id(
-            "codex".into(),
-            "Anything".into(),
-            json!({ "config": "base_url = \"https://api.openai.com/v1\"\n" }),
-            None,
-        );
-        provider.category = Some("official".to_string());
-        ProviderService::validate_provider_settings(&AppType::Codex, &provider)
-            .expect("Codex auth is optional for official providers (category=official)");
-    }
-
-    #[test]
-    #[serial]
-    fn switch_codex_succeeds_without_auth_json() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
-            .expect("create ~/.codex (initialized)");
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Codex);
-        {
-            let manager = config
-                .get_manager_mut(&AppType::Codex)
-                .expect("codex manager");
-            manager.current = "p2".to_string();
-            manager.providers.insert(
-                "p1".to_string(),
-                Provider::with_id(
-                    "p1".to_string(),
-                    "Keyring".to_string(),
-                    json!({
-                        "config": "model_provider = \"keyring\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.keyring]\nrequires_openai_auth = true\n",
-                    }),
-                    None,
-                ),
-            );
-            manager.providers.insert(
-                "p2".to_string(),
-                Provider::with_id(
-                    "p2".to_string(),
-                    "Other".to_string(),
-                    json!({
-                        "config": "model_provider = \"other\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.other]\nrequires_openai_auth = true\n",
-                    }),
-                    None,
-                ),
-            );
-        }
-
-        let state = state_from_config(config);
-
-        ProviderService::switch(&state, AppType::Codex, "p1")
-            .expect("switch should succeed without auth.json when using credential store");
-
-        assert!(
-            !get_codex_auth_path().exists(),
-            "auth.json should remain absent when provider has no auth config"
-        );
-
-        let live_config_text =
-            std::fs::read_to_string(get_codex_config_path()).expect("read live config.toml");
-
-        let guard = state.config.read().expect("read config after switch");
-        let manager = guard
-            .get_manager(&AppType::Codex)
-            .expect("codex manager after switch");
-        assert_eq!(manager.current, "p1", "current provider should update");
-        let provider = manager.providers.get("p1").expect("p1 exists");
-        assert!(
-            provider.settings_config.get("auth").is_none(),
-            "snapshot should not inject auth when auth.json is absent"
-        );
-        // After the switch, the stored config should match the live config.toml
-        let stored_config = provider
-            .settings_config
-            .get("config")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        assert!(
-            !stored_config.is_empty() || !live_config_text.trim().is_empty(),
-            "provider snapshot should have config text after switch"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn codex_switch_removes_existing_auth_json_for_openai_official_provider() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
-            .expect("create ~/.codex (initialized)");
-
-        // Seed an existing auth.json (simulates `codex login` or prior configuration).
-        let existing_auth = json!({ "OPENAI_API_KEY": "sk-existing" });
-        let auth_path = crate::codex_config::get_codex_auth_path();
-        crate::config::write_json_file(&auth_path, &existing_auth).expect("write auth.json");
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Codex);
-        {
-            let manager = config
-                .get_manager_mut(&AppType::Codex)
-                .expect("codex manager");
-            manager.current = "p1".to_string();
-            manager.providers.insert(
-                "p1".to_string(),
-                Provider::with_id(
-                    "p1".to_string(),
-                    "Third Party".to_string(),
-                    json!({
-                        "auth": { "OPENAI_API_KEY": "sk-third-party" },
-                        "config": "model_provider = \"thirdparty\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.thirdparty]\nbase_url = \"https://third-party.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
-                    }),
-                    None,
-                ),
-            );
-
-            let mut official = Provider::with_id(
-                "p2".to_string(),
-                "OpenAI Official".to_string(),
-                json!({
-                    "config": "model_provider = \"openai\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.openai]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
-                }),
-                None,
-            );
-            official.meta = Some(crate::provider::ProviderMeta {
-                codex_official: Some(true),
-                ..Default::default()
-            });
-            manager.providers.insert("p2".to_string(), official);
-        }
-
-        let state = state_from_config(config);
-
-        ProviderService::switch(&state, AppType::Codex, "p2")
-            .expect("switch to official should succeed");
-
-        assert!(
-            !auth_path.exists(),
-            "auth.json should be removed when switching to OpenAI official provider"
-        );
-
-        let backup_exists = std::fs::read_dir(crate::codex_config::get_codex_config_dir())
-            .expect("read codex dir")
-            .filter_map(Result::ok)
-            .any(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("auth.json.cc-switch.bak.")
-            });
-        assert!(
-            backup_exists,
-            "auth.json should be backed up when removed for OpenAI official provider"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn codex_switch_preserves_base_url_and_wire_api_across_multiple_switches() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
-            .expect("create ~/.codex (initialized)");
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Codex);
-        {
-            let manager = config
-                .get_manager_mut(&AppType::Codex)
-                .expect("codex manager");
-            manager.current = "p1".to_string();
-            manager.providers.insert(
-                "p1".to_string(),
-                Provider::with_id(
-                    "p1".to_string(),
-                    "Provider One".to_string(),
-                    json!({
-                        "auth": { "OPENAI_API_KEY": "sk-one" },
-                        "config": "model_provider = \"providerone\"\nmodel = \"gpt-4o\"\n\n[model_providers.providerone]\nbase_url = \"https://api.one.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n",
-                    }),
-                    None,
-                ),
-            );
-            manager.providers.insert(
-                "p2".to_string(),
-                Provider::with_id(
-                    "p2".to_string(),
-                    "Provider Two".to_string(),
-                    json!({
-                        "auth": { "OPENAI_API_KEY": "sk-two" },
-                        "config": "model_provider = \"providertwo\"\nmodel = \"gpt-4o\"\n\n[model_providers.providertwo]\nbase_url = \"https://api.two.example/v1\"\nwire_api = \"chat\"\nrequires_openai_auth = true\n",
-                    }),
-                    None,
-                ),
-            );
-        }
-
-        let state = state_from_config(config);
-
-        // Seed initial live config for p1, then switch to p2, then back to p1.
-        ProviderService::switch(&state, AppType::Codex, "p1").expect("seed p1 live");
-        ProviderService::switch(&state, AppType::Codex, "p2").expect("switch to p2");
-        ProviderService::switch(&state, AppType::Codex, "p1").expect("switch back to p1");
-
-        let live_text =
-            std::fs::read_to_string(get_codex_config_path()).expect("read live config.toml");
-        assert!(
-            live_text.contains("base_url = \"https://api.one.example/v1\""),
-            "live config should retain provider base_url after multiple switches"
-        );
-        assert!(
-            live_text.contains("wire_api = \"responses\""),
-            "live config should retain provider wire_api after multiple switches"
-        );
-
-        let guard = state.config.read().expect("read config");
-        let manager = guard.get_manager(&AppType::Codex).expect("codex manager");
-        let provider = manager.providers.get("p1").expect("p1 exists");
-        let cfg = provider
-            .settings_config
-            .get("config")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        assert!(
-            cfg.contains("base_url = \"https://api.one.example/v1\""),
-            "provider snapshot should retain base_url across switches"
-        );
-        assert!(
-            cfg.contains("wire_api = \"responses\""),
-            "provider snapshot should retain wire_api across switches"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn add_first_provider_sets_current() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Claude);
-        let state = state_from_config(config);
-
-        let provider = Provider::with_id(
-            "p1".to_string(),
-            "First".to_string(),
-            json!({
-                "env": {
-                    "ANTHROPIC_AUTH_TOKEN": "token",
-                    "ANTHROPIC_BASE_URL": "https://claude.example"
-                }
-            }),
-            None,
-        );
-
-        ProviderService::add(&state, AppType::Claude, provider).expect("add should succeed");
-
-        let cfg = state.config.read().expect("read config");
-        let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
-        assert_eq!(
-            manager.current, "p1",
-            "first provider should become current to avoid empty current provider"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn current_self_heals_when_current_provider_missing() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Claude);
-        {
-            let manager = config
-                .get_manager_mut(&AppType::Claude)
-                .expect("claude manager");
-            manager.current = "missing".to_string();
-
-            let mut p1 = Provider::with_id(
-                "p1".to_string(),
-                "First".to_string(),
-                json!({
-                    "env": {
-                        "ANTHROPIC_AUTH_TOKEN": "token1",
-                        "ANTHROPIC_BASE_URL": "https://claude.one"
-                    }
-                }),
-                None,
-            );
-            p1.sort_index = Some(10);
-
-            let mut p2 = Provider::with_id(
-                "p2".to_string(),
-                "Second".to_string(),
-                json!({
-                    "env": {
-                        "ANTHROPIC_AUTH_TOKEN": "token2",
-                        "ANTHROPIC_BASE_URL": "https://claude.two"
-                    }
-                }),
-                None,
-            );
-            p2.sort_index = Some(0);
-
-            manager.providers.insert("p1".to_string(), p1);
-            manager.providers.insert("p2".to_string(), p2);
-        }
-
-        let state = state_from_config(config);
-
-        let current_id =
-            ProviderService::current(&state, AppType::Claude).expect("self-heal current provider");
-        assert_eq!(
-            current_id, "p2",
-            "should pick provider with smaller sort_index"
-        );
-
-        let cfg = state.config.read().expect("read config");
-        let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
-        assert_eq!(
-            manager.current, "p2",
-            "current should be updated in config after self-heal"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn common_config_snippet_is_merged_into_claude_settings_on_write() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::config::get_claude_config_dir())
-            .expect("create ~/.claude (initialized)");
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Claude);
-        config.common_config_snippets.claude = Some(
-            r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false}"#
-                .to_string(),
-        );
-
-        let state = state_from_config(config);
-
-        let provider = Provider::with_id(
-            "p1".to_string(),
-            "First".to_string(),
-            json!({
-                "env": {
-                    "ANTHROPIC_AUTH_TOKEN": "token",
-                    "ANTHROPIC_BASE_URL": "https://claude.example"
-                }
-            }),
-            None,
-        );
-
-        ProviderService::add(&state, AppType::Claude, provider).expect("add should succeed");
-
-        let settings_path = get_claude_settings_path();
-        let live: Value = read_json_file(&settings_path).expect("read live settings");
-
-        assert_eq!(
-            live.get("includeCoAuthoredBy").and_then(Value::as_bool),
-            Some(false),
-            "common snippet should be merged into settings.json"
-        );
-
-        let env = live
-            .get("env")
-            .and_then(Value::as_object)
-            .expect("settings.env should be object");
-
-        assert_eq!(
-            env.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
-                .and_then(Value::as_i64),
-            Some(1),
-            "common env key should be present in settings.env"
-        );
-        assert_eq!(
-            env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
-            Some("token"),
-            "provider env key should remain in settings.env"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn common_config_snippet_can_be_disabled_per_provider_for_claude() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::config::get_claude_config_dir())
-            .expect("create ~/.claude (initialized)");
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Claude);
-        config.common_config_snippets.claude = Some(
-            r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false}"#
-                .to_string(),
-        );
-
-        let state = state_from_config(config);
-
-        let provider: Provider = serde_json::from_value(json!({
-            "id": "p1",
-            "name": "First",
-            "settingsConfig": {
-                "env": {
-                    "ANTHROPIC_AUTH_TOKEN": "token",
-                    "ANTHROPIC_BASE_URL": "https://claude.example"
-                }
-            },
-            "meta": { "applyCommonConfig": false }
-        }))
-        .expect("parse provider");
-
-        ProviderService::add(&state, AppType::Claude, provider).expect("add should succeed");
-
-        let settings_path = get_claude_settings_path();
-        let live: Value = read_json_file(&settings_path).expect("read live settings");
-
-        assert!(
-            live.get("includeCoAuthoredBy").is_none(),
-            "common snippet should not be merged when applyCommonConfig=false"
-        );
-        assert!(
-            !live
-                .get("env")
-                .and_then(Value::as_object)
-                .map(|env| env.contains_key("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
-                .unwrap_or(false),
-            "common env keys should not be merged when applyCommonConfig=false"
-        );
-        assert_eq!(
-            live.get("env")
-                .and_then(Value::as_object)
-                .and_then(|env| env.get("ANTHROPIC_AUTH_TOKEN"))
-                .and_then(Value::as_str),
-            Some("token"),
-            "provider env should still be written"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn common_config_snippet_is_not_persisted_into_provider_snapshot_on_switch() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Claude);
-        config.common_config_snippets.claude = Some(
-            r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false}"#
-                .to_string(),
-        );
-
-        let state = state_from_config(config);
-
-        let p1 = Provider::with_id(
-            "p1".to_string(),
-            "First".to_string(),
-            json!({
-                "env": {
-                    "ANTHROPIC_AUTH_TOKEN": "token1",
-                    "ANTHROPIC_BASE_URL": "https://claude.one"
-                }
-            }),
-            None,
-        );
-        let p2 = Provider::with_id(
-            "p2".to_string(),
-            "Second".to_string(),
-            json!({
-                "env": {
-                    "ANTHROPIC_AUTH_TOKEN": "token2",
-                    "ANTHROPIC_BASE_URL": "https://claude.two"
-                }
-            }),
-            None,
-        );
-
-        ProviderService::add(&state, AppType::Claude, p1).expect("add p1");
-        ProviderService::add(&state, AppType::Claude, p2).expect("add p2");
-
-        ProviderService::switch(&state, AppType::Claude, "p2").expect("switch to p2");
-
-        let cfg = state.config.read().expect("read config");
-        let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
-        let p1_after = manager.providers.get("p1").expect("p1 exists");
-
-        assert!(
-            p1_after
-                .settings_config
-                .get("includeCoAuthoredBy")
-                .is_none(),
-            "common top-level keys should not be persisted into provider snapshot"
-        );
-
-        let env = p1_after
-            .settings_config
-            .get("env")
-            .and_then(Value::as_object)
-            .expect("provider env should be object");
-        assert!(
-            !env.contains_key("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"),
-            "common env keys should not be persisted into provider snapshot"
-        );
-        assert_eq!(
-            env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str),
-            Some("token1"),
-            "provider-specific env should remain in snapshot"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn claude_live_write_and_backup_snapshot_share_common_config_semantics() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::config::get_claude_config_dir())
-            .expect("create ~/.claude (initialized)");
-
-        let provider = Provider::with_id(
-            "p1".to_string(),
-            "Claude".to_string(),
-            json!({
-                "env": {
-                    "ANTHROPIC_AUTH_TOKEN": "token",
-                    "ANTHROPIC_BASE_URL": "https://claude.example"
-                }
-            }),
-            None,
-        );
-        let snippet = r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":"1"}}"#;
-
-        ProviderService::write_live_snapshot(&AppType::Claude, &provider, Some(snippet), true)
-            .expect("write live snapshot");
-        let live: Value = read_json_file(&get_claude_settings_path()).expect("read live settings");
-
-        let backup = ProviderService::build_live_backup_snapshot(
-            &AppType::Claude,
-            &provider,
-            Some(snippet),
-            true,
-        )
-        .expect("build backup snapshot");
-
-        assert_eq!(
-            live, backup,
-            "Claude live write and backup snapshot should apply the same common snippet semantics"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn claude_switch_strips_common_array_items_but_preserves_provider_specific_ones() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::config::get_claude_config_dir())
-            .expect("create ~/.claude (initialized)");
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Claude);
-        config.common_config_snippets.claude = Some(r#"{"allowedTools":["tool1"]}"#.to_string());
-        {
-            let manager = config
-                .get_manager_mut(&AppType::Claude)
-                .expect("claude manager");
-            manager.current = "p1".to_string();
-            manager.providers.insert(
-                "p1".to_string(),
-                Provider::with_id(
-                    "p1".to_string(),
-                    "Legacy".to_string(),
-                    json!({
-                        "allowedTools": ["tool1", "tool2"],
-                        "env": {
-                            "ANTHROPIC_AUTH_TOKEN": "token1",
-                            "ANTHROPIC_BASE_URL": "https://claude.one"
-                        }
-                    }),
-                    None,
-                ),
-            );
-            manager.providers.insert(
-                "p2".to_string(),
-                Provider::with_id(
-                    "p2".to_string(),
-                    "Second".to_string(),
-                    json!({
-                        "env": {
-                            "ANTHROPIC_AUTH_TOKEN": "token2",
-                            "ANTHROPIC_BASE_URL": "https://claude.two"
-                        }
-                    }),
-                    None,
-                ),
-            );
-            let p1 = manager.providers.get_mut("p1").expect("p1 before switch");
-            p1.meta = None;
-        }
-
-        let state = state_from_config(config);
-        write_json_file(
-            &get_claude_settings_path(),
-            &json!({
-                "allowedTools": ["tool1", "tool2"],
-                "env": {
-                    "ANTHROPIC_AUTH_TOKEN": "token1",
-                    "ANTHROPIC_BASE_URL": "https://claude.one"
-                }
-            }),
-        )
-        .expect("seed claude live settings");
-
-        ProviderService::switch(&state, AppType::Claude, "p2").expect("switch to p2");
-
-        let cfg = state.config.read().expect("read config after switch");
-        let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
-        let p1_after = manager.providers.get("p1").expect("p1 exists");
-        assert_eq!(
-            p1_after
-                .settings_config
-                .get("allowedTools")
-                .and_then(Value::as_array)
-                .cloned(),
-            Some(vec![Value::String("tool2".to_string())]),
-            "switch-away snapshot should keep only provider-specific array items"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn claude_switch_normalizes_legacy_common_config_into_explicit_meta() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::config::get_claude_config_dir())
-            .expect("create ~/.claude (initialized)");
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Claude);
-        config.common_config_snippets.claude = Some(
-            r#"{"env":{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":1},"includeCoAuthoredBy":false}"#
-                .to_string(),
-        );
-
-        let state = state_from_config(config);
-
-        let p1 = Provider::with_id(
-            "p1".to_string(),
-            "First".to_string(),
-            json!({
-                "env": {
-                    "ANTHROPIC_AUTH_TOKEN": "token1",
-                    "ANTHROPIC_BASE_URL": "https://claude.one"
-                }
-            }),
-            None,
-        );
-        let p2 = Provider::with_id(
-            "p2".to_string(),
-            "Legacy".to_string(),
-            json!({
-                "env": {
-                    "ANTHROPIC_AUTH_TOKEN": "token2",
-                    "ANTHROPIC_BASE_URL": "https://claude.two",
-                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": 1
-                },
-                "includeCoAuthoredBy": false
-            }),
-            None,
-        );
-
-        ProviderService::add(&state, AppType::Claude, p1).expect("add p1");
-        ProviderService::add(&state, AppType::Claude, p2).expect("add p2");
-
-        {
-            let mut guard = state.config.write().expect("read config before switch");
-            let manager = guard
-                .get_manager_mut(&AppType::Claude)
-                .expect("claude manager before switch");
-            let p2 = manager.providers.get_mut("p2").expect("p2 before switch");
-            p2.meta = None;
-        }
-        state.save().expect("persist legacy provider state");
-
-        {
-            let guard = state
-                .config
-                .read()
-                .expect("read config for setup assertion");
-            let p2 = guard
-                .get_manager(&AppType::Claude)
-                .and_then(|manager| manager.providers.get("p2"))
-                .expect("p2 setup snapshot");
-            assert!(
-                provider_uses_common_config(
-                    &AppType::Claude,
-                    p2,
-                    state
-                        .config
-                        .read()
-                        .expect("read common snippet")
-                        .common_config_snippets
-                        .claude
-                        .as_deref(),
-                ),
-                "test setup should exercise legacy common-config inference"
-            );
-        }
-
-        ProviderService::switch(&state, AppType::Claude, "p2").expect("switch to legacy p2");
-
-        let cfg = state.config.read().expect("read config after switch");
-        let manager = cfg.get_manager(&AppType::Claude).expect("claude manager");
-        let p2_after = manager.providers.get("p2").expect("p2 exists");
-        let meta = p2_after
-            .meta
-            .as_ref()
-            .expect("p2 meta should be normalized");
-        assert_eq!(
-            meta.apply_common_config,
-            Some(true),
-            "legacy common-config usage should be normalized into explicit meta"
-        );
-        assert!(
-            p2_after
-                .settings_config
-                .get("includeCoAuthoredBy")
-                .is_none(),
-            "normalized snapshot should strip common top-level keys"
-        );
-        assert!(
-            !p2_after
-                .settings_config
-                .get("env")
-                .and_then(Value::as_object)
-                .map(|env| env.contains_key("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"))
-                .unwrap_or(false),
-            "normalized snapshot should strip common env keys"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn common_config_snippet_is_merged_into_codex_config_on_write() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
-            .expect("create ~/.codex (initialized)");
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Codex);
-        config.common_config_snippets.codex = Some("disable_response_storage = true".to_string());
-
-        let state = state_from_config(config);
-
-        let provider = Provider::with_id(
-            "p1".to_string(),
-            "First".to_string(),
-            json!({
-                "auth": { "OPENAI_API_KEY": "sk-test" },
-                "config": "model_provider = \"first\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.first]\nbase_url = \"https://api.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
-            }),
-            None,
-        );
-
-        ProviderService::add(&state, AppType::Codex, provider).expect("add should succeed");
-
-        let live_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
-        assert!(
-            live_text.contains("disable_response_storage = true"),
-            "common snippet should be merged into config.toml"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn codex_switch_extracts_common_snippet_preserving_mcp_servers() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Codex);
-        {
-            let manager = config
-                .get_manager_mut(&AppType::Codex)
-                .expect("codex manager");
-            manager.current = "p1".to_string();
-            manager.providers.insert(
-                "p1".to_string(),
-                Provider::with_id(
-                    "p1".to_string(),
-                    "First".to_string(),
-                    json!({ "config": "model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n" }),
-                    None,
-                ),
-            );
-            manager.providers.insert(
-                "p2".to_string(),
-                Provider::with_id(
-                    "p2".to_string(),
-                    "Second".to_string(),
-                    json!({ "config": "model_provider = \"second\"\nmodel = \"gpt-4\"\n\n[model_providers.second]\nbase_url = \"https://api.two.example/v1\"\n" }),
-                    None,
-                ),
-            );
-        }
-
-        let state = state_from_config(config);
-
-        let config_toml = r#"model_provider = "azure"
-model = "gpt-4"
-disable_response_storage = true
-
-[model_providers.azure]
-name = "Azure OpenAI"
-base_url = "https://azure.example/v1"
-wire_api = "responses"
-
-[mcp_servers.my_server]
-base_url = "http://localhost:8080"
-"#;
-
-        let config_path = get_codex_config_path();
-        if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent).expect("create codex dir");
-        }
-        std::fs::write(&config_path, config_toml).expect("seed config.toml");
-
-        ProviderService::switch(&state, AppType::Codex, "p2").expect("switch should succeed");
-
-        let cfg = state.config.read().expect("read config after switch");
-        let extracted = cfg
-            .common_config_snippets
-            .codex
-            .as_deref()
-            .unwrap_or_default();
-
-        assert!(
-            extracted.contains("disable_response_storage = true"),
-            "should keep top-level common config"
-        );
-        assert!(
-            extracted.contains("[mcp_servers.my_server]"),
-            "should keep mcp_servers table"
-        );
-        assert!(
-            extracted.contains("base_url = \"http://localhost:8080\""),
-            "should keep mcp_servers.* base_url"
-        );
-        assert!(
-            !extracted
-                .lines()
-                .any(|line| line.trim_start().starts_with("model_provider")),
-            "should remove top-level model_provider"
-        );
-        assert!(
-            !extracted
-                .lines()
-                .any(|line| line.trim_start().starts_with("model =")),
-            "should remove top-level model"
-        );
-        assert!(
-            !extracted.contains("[model_providers"),
-            "should remove entire model_providers table"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn codex_switch_backfill_does_not_persist_synced_mcp_servers_into_previous_provider_snapshot() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
-            .expect("create ~/.codex (initialized)");
-
-        let p1_config = concat!(
-            "model_provider = \"first\"\n",
-            "model = \"gpt-5.2-codex\"\n\n",
-            "[model_providers.first]\n",
-            "base_url = \"https://api.one.example/v1\"\n",
-            "wire_api = \"responses\"\n",
-            "requires_openai_auth = true\n"
-        );
-        let p2_config = concat!(
-            "model_provider = \"second\"\n",
-            "model = \"gpt-5.2-codex\"\n\n",
-            "[model_providers.second]\n",
-            "base_url = \"https://api.two.example/v1\"\n",
-            "wire_api = \"responses\"\n",
-            "requires_openai_auth = true\n"
-        );
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Codex);
-        config.mcp.servers = Some(HashMap::from([(
-            "echo-server".to_string(),
-            McpServer {
-                id: "echo-server".to_string(),
-                name: "Echo Server".to_string(),
-                server: json!({
-                    "type": "stdio",
-                    "command": "echo"
-                }),
-                apps: McpApps {
-                    claude: false,
-                    codex: true,
-                    gemini: false,
-                    opencode: false,
-                },
-                description: None,
-                homepage: None,
-                docs: None,
-                tags: Vec::new(),
-            },
-        )]));
-        {
-            let manager = config
-                .get_manager_mut(&AppType::Codex)
-                .expect("codex manager");
-            manager.current = "p1".to_string();
-            manager.providers.insert(
-                "p1".to_string(),
-                Provider::with_id(
-                    "p1".to_string(),
-                    "First".to_string(),
-                    json!({ "config": p1_config }),
-                    None,
-                ),
-            );
-            manager.providers.insert(
-                "p2".to_string(),
-                Provider::with_id(
-                    "p2".to_string(),
-                    "Second".to_string(),
-                    json!({ "config": p2_config }),
-                    None,
-                ),
-            );
-        }
-
-        let state = state_from_config(config);
-        std::fs::write(get_codex_config_path(), p1_config).expect("seed config.toml");
-        crate::services::mcp::McpService::sync_all_enabled(&state).expect("sync MCP to live");
-
-        ProviderService::switch(&state, AppType::Codex, "p2").expect("switch should succeed");
-
-        let cfg = state.config.read().expect("read config after switch");
-        let manager = cfg.get_manager(&AppType::Codex).expect("codex manager");
-        let p1_after = manager.providers.get("p1").expect("p1 exists");
-        let stored_config = p1_after
-            .settings_config
-            .get("config")
-            .and_then(Value::as_str)
-            .expect("stored config text");
-
-        assert!(
-            !stored_config.contains("[mcp_servers.echo-server]"),
-            "backfill snapshot should not persist synced Codex MCP servers"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn common_config_snippet_can_be_disabled_per_provider_for_codex() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
-            .expect("create ~/.codex (initialized)");
-
-        let config_path = get_codex_config_path();
-        std::fs::write(
-            &config_path,
-            "disable_response_storage = true\nnetwork_access = \"restricted\"\n",
-        )
-        .expect("seed config.toml");
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Codex);
-        config.common_config_snippets.codex = Some("disable_response_storage = true".to_string());
-        {
-            let manager = config
-                .get_manager_mut(&AppType::Codex)
-                .expect("codex manager");
-            manager.current = "p1".to_string();
-            manager.providers.insert(
-                "p1".to_string(),
-                Provider::with_id(
-                    "p1".to_string(),
-                    "First".to_string(),
-                    json!({ "config": "model_provider = \"first\"\nmodel = \"gpt-4\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\n" }),
-                    None,
-                ),
-            );
-            manager.providers.insert(
-                "p2".to_string(),
-                serde_json::from_value(json!({
-                    "id": "p2",
-                    "name": "Second",
-                    "settingsConfig": { "config": "model_provider = \"second\"\nmodel = \"gpt-4\"\n\n[model_providers.second]\nbase_url = \"https://api.two.example/v1\"\n" },
-                    "meta": { "applyCommonConfig": false }
-                }))
-                .expect("parse provider p2"),
-            );
-        }
-
-        let state = state_from_config(config);
-
-        ProviderService::switch(&state, AppType::Codex, "p2").expect("switch should succeed");
-
-        let live_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
-        assert!(
-            !live_text.contains("disable_response_storage = true"),
-            "common snippet should not be merged when applyCommonConfig=false"
-        );
-        assert!(
-            live_text.contains("base_url = \"https://api.two.example/v1\""),
-            "provider-specific config should be written"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn codex_switch_away_preserves_provider_owned_fields_when_common_config_is_disabled() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
-            .expect("create ~/.codex (initialized)");
-
-        let p1_config = concat!(
-            "model_provider = \"first\"\n",
-            "model = \"gpt-5.2-codex\"\n",
-            "disable_response_storage = true\n",
-            "network_access = \"restricted\"\n\n",
-            "[model_providers.first]\n",
-            "base_url = \"https://api.one.example/v1\"\n",
-            "wire_api = \"responses\"\n",
-            "requires_openai_auth = true\n"
-        );
-        let p2_config = concat!(
-            "model_provider = \"second\"\n",
-            "model = \"gpt-5.2-codex\"\n\n",
-            "[model_providers.second]\n",
-            "base_url = \"https://api.two.example/v1\"\n",
-            "wire_api = \"responses\"\n",
-            "requires_openai_auth = true\n"
-        );
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Codex);
-        config.common_config_snippets.codex =
-            Some("disable_response_storage = true\nnetwork_access = \"restricted\"\n".to_string());
-        {
-            let manager = config
-                .get_manager_mut(&AppType::Codex)
-                .expect("codex manager");
-            manager.current = "p1".to_string();
-            manager.providers.insert(
-                "p1".to_string(),
-                serde_json::from_value(json!({
-                    "id": "p1",
-                    "name": "First",
-                    "settingsConfig": { "config": p1_config },
-                    "meta": { "applyCommonConfig": false }
-                }))
-                .expect("parse provider p1"),
-            );
-            manager.providers.insert(
-                "p2".to_string(),
-                Provider::with_id(
-                    "p2".to_string(),
-                    "Second".to_string(),
-                    json!({ "config": p2_config }),
-                    None,
-                ),
-            );
-        }
-
-        let state = state_from_config(config);
-
-        std::fs::write(get_codex_config_path(), p1_config)
-            .expect("seed config.toml with p1 live state");
-
-        ProviderService::switch(&state, AppType::Codex, "p2").expect("switch should succeed");
-
-        let cfg = state.config.read().expect("read config after switch");
-        let manager = cfg.get_manager(&AppType::Codex).expect("codex manager");
-        let p1_after = manager.providers.get("p1").expect("p1 should remain");
-        let stored_config = p1_after
-            .settings_config
-            .get("config")
-            .and_then(Value::as_str)
-            .expect("stored config text");
-
-        assert!(
-            stored_config.contains("disable_response_storage = true"),
-            "switch-away snapshot should keep provider-owned overlapping fields when applyCommonConfig=false"
-        );
-        assert!(
-            stored_config.contains("network_access = \"restricted\""),
-            "switch-away snapshot should keep provider-owned overlapping fields when applyCommonConfig=false"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn codex_switch_away_preserves_provider_specific_fields_inside_partially_shared_root_table() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
-            .expect("create ~/.codex (initialized)");
-
-        let p1_config = concat!(
-            "model_provider = \"legacy\"\n",
-            "model = \"gpt-5.2-codex\"\n\n",
-            "[model_providers.legacy]\n",
-            "base_url = \"https://api.legacy.example/v1\"\n",
-            "wire_api = \"responses\"\n",
-            "requires_openai_auth = true\n\n",
-            "[mcp_servers.shared]\n",
-            "base_url = \"http://localhost:8080\"\n",
-            "transport = \"sse\"\n"
-        );
-        let p2_config = concat!(
-            "model_provider = \"second\"\n",
-            "model = \"gpt-5.2-codex\"\n\n",
-            "[model_providers.second]\n",
-            "base_url = \"https://api.two.example/v1\"\n",
-            "wire_api = \"responses\"\n",
-            "requires_openai_auth = true\n"
-        );
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Codex);
-        config.common_config_snippets.codex =
-            Some("[mcp_servers.shared]\nbase_url = \"http://localhost:8080\"\n".to_string());
-        {
-            let manager = config
-                .get_manager_mut(&AppType::Codex)
-                .expect("codex manager");
-            manager.current = "p1".to_string();
-            manager.providers.insert(
-                "p1".to_string(),
-                Provider::with_id(
-                    "p1".to_string(),
-                    "Legacy".to_string(),
-                    json!({ "config": p1_config }),
-                    None,
-                ),
-            );
-            manager.providers.insert(
-                "p2".to_string(),
-                Provider::with_id(
-                    "p2".to_string(),
-                    "Second".to_string(),
-                    json!({ "config": p2_config }),
-                    None,
-                ),
-            );
-            let p1 = manager.providers.get_mut("p1").expect("p1 before switch");
-            p1.meta = None;
-        }
-
-        let state = state_from_config(config);
-        std::fs::write(get_codex_config_path(), p1_config)
-            .expect("seed config.toml with p1 live state");
-
-        ProviderService::switch(&state, AppType::Codex, "p2").expect("switch to p2");
-
-        let cfg = state.config.read().expect("read config after switch");
-        let manager = cfg.get_manager(&AppType::Codex).expect("codex manager");
-        let p1_after = manager.providers.get("p1").expect("p1 exists");
-        let stored_config = p1_after
-            .settings_config
-            .get("config")
-            .and_then(Value::as_str)
-            .expect("stored config text");
-
-        assert!(
-            stored_config.contains("transport = \"sse\""),
-            "switch-away snapshot should preserve provider-specific siblings inside partially shared tables"
-        );
-        assert!(
-            !stored_config.contains("base_url = \"http://localhost:8080\""),
-            "switch-away snapshot should still strip only the shared table field"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn codex_switch_without_legacy_common_config_does_not_auto_apply_common_snippet() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
-            .expect("create ~/.codex (initialized)");
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Codex);
-        config.common_config_snippets.codex =
-            Some("disable_response_storage = true\nnetwork_access = \"restricted\"\n".to_string());
-        {
-            let manager = config
-                .get_manager_mut(&AppType::Codex)
-                .expect("codex manager");
-            manager.current = "p1".to_string();
-            manager.providers.insert(
-                "p1".to_string(),
-                Provider::with_id(
-                    "p1".to_string(),
-                    "First".to_string(),
-                    json!({
-                        "config": "model_provider = \"first\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
-                    }),
-                    None,
-                ),
-            );
-            manager.providers.insert(
-                "p2".to_string(),
-                Provider::with_id(
-                    "p2".to_string(),
-                    "Second".to_string(),
-                    json!({
-                        "config": "model_provider = \"second\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.second]\nbase_url = \"https://api.two.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
-                    }),
-                    None,
-                ),
-            );
-        }
-
-        let state = state_from_config(config);
-
-        ProviderService::switch(&state, AppType::Codex, "p2").expect("switch should succeed");
-
-        let live_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
-        assert!(
-            !live_text.contains("disable_response_storage = true"),
-            "common snippet should not be auto-merged when provider snapshot does not imply it"
-        );
-        assert!(
-            !live_text.contains("network_access = \"restricted\""),
-            "common snippet should not be auto-merged when provider snapshot does not imply it"
-        );
-        assert!(
-            live_text.contains("base_url = \"https://api.two.example/v1\""),
-            "provider-specific config should still be written"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn codex_switch_with_legacy_common_config_still_applies_common_snippet() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
-            .expect("create ~/.codex (initialized)");
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Codex);
-        config.common_config_snippets.codex =
-            Some("disable_response_storage = true\nnetwork_access = \"restricted\"\n".to_string());
-        {
-            let manager = config
-                .get_manager_mut(&AppType::Codex)
-                .expect("codex manager");
-            manager.current = "p1".to_string();
-            manager.providers.insert(
-                "p1".to_string(),
-                Provider::with_id(
-                    "p1".to_string(),
-                    "First".to_string(),
-                    json!({
-                        "config": "model_provider = \"first\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
-                    }),
-                    None,
-                ),
-            );
-            manager.providers.insert(
-                "p2".to_string(),
-                Provider::with_id(
-                    "p2".to_string(),
-                    "Legacy".to_string(),
-                    json!({
-                        "config": "model_provider = \"legacy\"\nmodel = \"gpt-5.2-codex\"\ndisable_response_storage = true\nnetwork_access = \"restricted\"\n\n[model_providers.legacy]\nbase_url = \"https://api.legacy.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
-                    }),
-                    None,
-                ),
-            );
-        }
-
-        let state = state_from_config(config);
-
-        ProviderService::switch(&state, AppType::Codex, "p2").expect("switch should succeed");
-
-        let live_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
-        assert!(
-            live_text.contains("disable_response_storage = true"),
-            "legacy provider snapshots that already contain the common snippet should keep it applied"
-        );
-        assert!(
-            live_text.contains("network_access = \"restricted\""),
-            "legacy provider snapshots that already contain the common snippet should keep it applied"
-        );
-        assert!(
-            live_text.contains("base_url = \"https://api.legacy.example/v1\""),
-            "provider-specific config should still be written"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn codex_switch_normalizes_legacy_common_config_into_explicit_meta() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
-            .expect("create ~/.codex (initialized)");
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Codex);
-        config.common_config_snippets.codex =
-            Some("disable_response_storage = true\nnetwork_access = \"restricted\"\n".to_string());
-        {
-            let manager = config
-                .get_manager_mut(&AppType::Codex)
-                .expect("codex manager");
-            manager.current = "p1".to_string();
-            manager.providers.insert(
-                "p1".to_string(),
-                Provider::with_id(
-                    "p1".to_string(),
-                    "First".to_string(),
-                    json!({
-                        "config": "model_provider = \"first\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.first]\nbase_url = \"https://api.one.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
-                    }),
-                    None,
-                ),
-            );
-            manager.providers.insert(
-                "p2".to_string(),
-                Provider::with_id(
-                    "p2".to_string(),
-                    "Legacy".to_string(),
-                    json!({
-                        "config": "model_provider = \"legacy\"\nmodel = \"gpt-5.2-codex\"\ndisable_response_storage = true\nnetwork_access = \"restricted\"\n\n[model_providers.legacy]\nbase_url = \"https://api.legacy.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
-                    }),
-                    None,
-                ),
-            );
-            let p2 = manager.providers.get_mut("p2").expect("p2 before switch");
-            p2.meta = None;
-        }
-
-        let state = state_from_config(config);
-        state.save().expect("persist legacy provider state");
-
-        {
-            let guard = state
-                .config
-                .read()
-                .expect("read config for setup assertion");
-            let p2 = guard
-                .get_manager(&AppType::Codex)
-                .and_then(|manager| manager.providers.get("p2"))
-                .expect("p2 setup snapshot");
-            assert!(
-                provider_uses_common_config(
-                    &AppType::Codex,
-                    p2,
-                    state
-                        .config
-                        .read()
-                        .expect("read common snippet")
-                        .common_config_snippets
-                        .codex
-                        .as_deref(),
-                ),
-                "test setup should exercise legacy common-config inference"
-            );
-        }
-
-        ProviderService::switch(&state, AppType::Codex, "p2").expect("switch should succeed");
-
-        let cfg = state.config.read().expect("read config after switch");
-        let manager = cfg.get_manager(&AppType::Codex).expect("codex manager");
-        let p2_after = manager.providers.get("p2").expect("p2 exists");
-        let meta = p2_after
-            .meta
-            .as_ref()
-            .expect("p2 meta should be normalized");
-        assert_eq!(
-            meta.apply_common_config,
-            Some(true),
-            "legacy common-config usage should be normalized into explicit meta"
-        );
-        let config_text = p2_after
-            .settings_config
-            .get("config")
-            .and_then(Value::as_str)
-            .expect("stored config text");
-        assert!(
-            !config_text.contains("disable_response_storage = true"),
-            "normalized snapshot should strip common top-level keys"
-        );
-        assert!(
-            !config_text.contains("network_access = \"restricted\""),
-            "normalized snapshot should strip common top-level keys"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn codex_update_normalizes_legacy_common_config_into_explicit_meta() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
-            .expect("create ~/.codex (initialized)");
-
-        let legacy_config = concat!(
-            "model_provider = \"legacy\"\n",
-            "model = \"gpt-5.2-codex\"\n",
-            "disable_response_storage = true\n",
-            "network_access = \"restricted\"\n\n",
-            "[model_providers.legacy]\n",
-            "base_url = \"https://api.legacy.example/v1\"\n",
-            "wire_api = \"responses\"\n",
-            "requires_openai_auth = true\n"
-        );
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Codex);
-        config.common_config_snippets.codex =
-            Some("disable_response_storage = true\nnetwork_access = \"restricted\"\n".to_string());
-        {
-            let manager = config
-                .get_manager_mut(&AppType::Codex)
-                .expect("codex manager");
-            manager.current = "p1".to_string();
-            manager.providers.insert(
-                "p1".to_string(),
-                Provider::with_id(
-                    "p1".to_string(),
-                    "Legacy".to_string(),
-                    json!({
-                        "auth": { "OPENAI_API_KEY": "sk-test" },
-                        "config": legacy_config
-                    }),
-                    None,
-                ),
-            );
-            let p1 = manager.providers.get_mut("p1").expect("p1 before update");
-            p1.meta = None;
-        }
-
-        let state = state_from_config(config);
-        state.save().expect("persist legacy provider state");
-
-        {
-            let guard = state
-                .config
-                .read()
-                .expect("read config for setup assertion");
-            let p1 = guard
-                .get_manager(&AppType::Codex)
-                .and_then(|manager| manager.providers.get("p1"))
-                .expect("p1 setup snapshot");
-            assert!(
-                provider_uses_common_config(
-                    &AppType::Codex,
-                    p1,
-                    guard.common_config_snippets.codex.as_deref(),
-                ),
-                "test setup should exercise legacy common-config inference"
-            );
-        }
-
-        let updated = Provider::with_id(
-            "p1".to_string(),
-            "Legacy Updated".to_string(),
-            json!({
-                "auth": { "OPENAI_API_KEY": "sk-test" },
-                "config": legacy_config
-            }),
-            None,
-        );
-        ProviderService::update(&state, AppType::Codex, updated).expect("update should succeed");
-
-        let cfg = state.config.read().expect("read config after update");
-        let manager = cfg.get_manager(&AppType::Codex).expect("codex manager");
-        let p1_after = manager.providers.get("p1").expect("p1 exists");
-        let meta = p1_after
-            .meta
-            .as_ref()
-            .expect("p1 meta should be normalized");
-        assert_eq!(
-            meta.apply_common_config,
-            Some(true),
-            "current-provider update should durably normalize legacy common-config usage"
-        );
-        let config_text = p1_after
-            .settings_config
-            .get("config")
-            .and_then(Value::as_str)
-            .expect("stored config text");
-        assert!(
-            !config_text.contains("disable_response_storage = true"),
-            "normalized update snapshot should strip common top-level keys"
-        );
-        assert!(
-            !config_text.contains("network_access = \"restricted\""),
-            "normalized update snapshot should strip common top-level keys"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn codex_update_with_common_config_disabled_does_not_extract_global_snippet() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
-            .expect("create ~/.codex (initialized)");
-
-        let provider_config = concat!(
-            "model_provider = \"solo\"\n",
-            "model = \"gpt-5.2-codex\"\n",
-            "network_access = \"restricted\"\n\n",
-            "[model_providers.solo]\n",
-            "base_url = \"https://api.solo.example/v1\"\n",
-            "wire_api = \"responses\"\n",
-            "requires_openai_auth = true\n"
-        );
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Codex);
-        {
-            let manager = config
-                .get_manager_mut(&AppType::Codex)
-                .expect("codex manager");
-            manager.current = "p1".to_string();
-            manager.providers.insert(
-                "p1".to_string(),
-                serde_json::from_value(json!({
-                    "id": "p1",
-                    "name": "Solo",
-                    "settingsConfig": {
-                        "auth": { "OPENAI_API_KEY": "sk-test" },
-                        "config": provider_config
-                    },
-                    "meta": { "applyCommonConfig": false }
-                }))
-                .expect("parse provider p1"),
-            );
-        }
-
-        let state = state_from_config(config);
-
-        let updated = serde_json::from_value(json!({
-            "id": "p1",
-            "name": "Solo Updated",
-            "settingsConfig": {
-                "auth": { "OPENAI_API_KEY": "sk-test" },
-                "config": provider_config
-            },
-            "meta": { "applyCommonConfig": false }
-        }))
-        .expect("parse updated provider");
-        ProviderService::update(&state, AppType::Codex, updated).expect("update should succeed");
-
-        let cfg = state.config.read().expect("read config after update");
-        assert!(
-            cfg.common_config_snippets.codex.is_none(),
-            "opt-out Codex provider updates should not invent a global common snippet"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn codex_switch_roundtrip_preserves_legacy_common_config_usage_after_backfill() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
-            .expect("create ~/.codex (initialized)");
-
-        let p1_config = concat!(
-            "model_provider = \"legacy\"\n",
-            "model = \"gpt-5.2-codex\"\n",
-            "disable_response_storage = true\n",
-            "network_access = \"restricted\"\n\n",
-            "[model_providers.legacy]\n",
-            "base_url = \"https://api.legacy.example/v1\"\n",
-            "wire_api = \"responses\"\n",
-            "requires_openai_auth = true\n"
-        );
-        let p2_config = concat!(
-            "model_provider = \"second\"\n",
-            "model = \"gpt-5.2-codex\"\n\n",
-            "[model_providers.second]\n",
-            "base_url = \"https://api.two.example/v1\"\n",
-            "wire_api = \"responses\"\n",
-            "requires_openai_auth = true\n"
-        );
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Codex);
-        config.common_config_snippets.codex =
-            Some("disable_response_storage = true\nnetwork_access = \"restricted\"\n".to_string());
-        {
-            let manager = config
-                .get_manager_mut(&AppType::Codex)
-                .expect("codex manager");
-            manager.current = "p1".to_string();
-            manager.providers.insert(
-                "p1".to_string(),
-                Provider::with_id(
-                    "p1".to_string(),
-                    "Legacy".to_string(),
-                    json!({ "config": p1_config }),
-                    None,
-                ),
-            );
-            manager.providers.insert(
-                "p2".to_string(),
-                Provider::with_id(
-                    "p2".to_string(),
-                    "Second".to_string(),
-                    json!({ "config": p2_config }),
-                    None,
-                ),
-            );
-            let p1 = manager.providers.get_mut("p1").expect("p1 before switch");
-            p1.meta = None;
-        }
-
-        let state = state_from_config(config);
-        std::fs::write(get_codex_config_path(), p1_config)
-            .expect("seed config.toml with p1 live state");
-
-        ProviderService::switch(&state, AppType::Codex, "p2").expect("switch to p2");
-        ProviderService::switch(&state, AppType::Codex, "p1").expect("switch back to p1");
-
-        let live_text = std::fs::read_to_string(get_codex_config_path()).expect("read config.toml");
-        assert!(
-            live_text.contains("disable_response_storage = true"),
-            "round-tripping through switch-away should preserve legacy common-config behavior"
-        );
-        assert!(
-            live_text.contains("network_access = \"restricted\""),
-            "round-tripping through switch-away should preserve legacy common-config behavior"
-        );
-    }
-
-    #[test]
-    fn codex_backup_snapshot_respects_common_config_inference() {
-        let snippet = "disable_response_storage = true\nnetwork_access = \"restricted\"\n";
-
-        let clean_provider = Provider::with_id(
-            "clean".to_string(),
-            "Clean".to_string(),
-            json!({
-                "config": "model_provider = \"clean\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.clean]\nbase_url = \"https://api.clean.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
-            }),
-            None,
-        );
-        let clean_snapshot = ProviderService::build_live_backup_snapshot(
-            &AppType::Codex,
-            &clean_provider,
-            Some(snippet),
-            true,
-        )
-        .expect("build clean backup snapshot");
-        let clean_text = clean_snapshot
-            .get("config")
-            .and_then(Value::as_str)
-            .expect("clean backup config");
-        assert!(
-            !clean_text.contains("disable_response_storage = true"),
-            "proxy backup path should not auto-merge common snippet for clean snapshots"
-        );
-
-        let legacy_provider = Provider::with_id(
-            "legacy".to_string(),
-            "Legacy".to_string(),
-            json!({
-                "config": "model_provider = \"legacy\"\nmodel = \"gpt-5.2-codex\"\ndisable_response_storage = true\nnetwork_access = \"restricted\"\n\n[model_providers.legacy]\nbase_url = \"https://api.legacy.example/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
-            }),
-            None,
-        );
-        let legacy_snapshot = ProviderService::build_live_backup_snapshot(
-            &AppType::Codex,
-            &legacy_provider,
-            Some(snippet),
-            true,
-        )
-        .expect("build legacy backup snapshot");
-        let legacy_text = legacy_snapshot
-            .get("config")
-            .and_then(Value::as_str)
-            .expect("legacy backup config");
-        assert!(
-            legacy_text.contains("disable_response_storage = true"),
-            "proxy backup path should preserve common snippet for legacy snapshots"
-        );
-    }
-
-    #[test]
-    fn extract_credentials_returns_expected_values() {
-        let provider = Provider::with_id(
-            "claude".into(),
-            "Claude".into(),
-            json!({
-                "env": {
-                    "ANTHROPIC_AUTH_TOKEN": "token",
-                    "ANTHROPIC_BASE_URL": "https://claude.example"
-                }
-            }),
-            None,
-        );
-        let (api_key, base_url) =
-            ProviderService::extract_credentials(&provider, &AppType::Claude).unwrap();
-        assert_eq!(api_key, "token");
-        assert_eq!(base_url, "https://claude.example");
-    }
-
-    #[test]
-    fn resolve_usage_script_credentials_falls_back_to_provider_values() {
-        let provider = Provider::with_id(
-            "claude".into(),
-            "Claude".into(),
-            json!({
-                "env": {
-                    "ANTHROPIC_AUTH_TOKEN": "token",
-                    "ANTHROPIC_BASE_URL": "https://claude.example"
-                }
-            }),
-            None,
-        );
-        let usage_script = crate::provider::UsageScript {
-            enabled: true,
-            language: "javascript".to_string(),
-            code: String::new(),
-            timeout: None,
-            api_key: None,
-            base_url: None,
-            access_token: None,
-            user_id: None,
-            template_type: None,
-            auto_query_interval: None,
-        };
-
-        let (api_key, base_url) = ProviderService::resolve_usage_script_credentials(
-            &provider,
-            &AppType::Claude,
-            &usage_script,
-        )
-        .expect("should resolve via provider values");
-        assert_eq!(api_key, "token");
-        assert_eq!(base_url, "https://claude.example");
-    }
-
-    #[test]
-    fn resolve_usage_script_credentials_does_not_require_provider_api_key_when_script_has_one() {
-        let provider = Provider::with_id(
-            "claude".into(),
-            "Claude".into(),
-            json!({
-                "env": {
-                    "ANTHROPIC_BASE_URL": "https://claude.example"
-                }
-            }),
-            None,
-        );
-        let usage_script = crate::provider::UsageScript {
-            enabled: true,
-            language: "javascript".to_string(),
-            code: String::new(),
-            timeout: None,
-            api_key: Some("override".to_string()),
-            base_url: None,
-            access_token: None,
-            user_id: None,
-            template_type: None,
-            auto_query_interval: None,
-        };
-
-        let (api_key, base_url) = ProviderService::resolve_usage_script_credentials(
-            &provider,
-            &AppType::Claude,
-            &usage_script,
-        )
-        .expect("should resolve base_url from provider without needing provider api key");
-        assert_eq!(api_key, "override");
-        assert_eq!(base_url, "https://claude.example");
-    }
-
-    #[test]
-    #[serial]
-    fn common_config_snippet_is_merged_into_gemini_env_on_write() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::gemini_config::get_gemini_dir())
-            .expect("create ~/.gemini (initialized)");
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Gemini);
-        config.common_config_snippets.gemini =
-            Some(r#"{"env":{"CC_SWITCH_GEMINI_COMMON":"1"}}"#.to_string());
-
-        let state = state_from_config(config);
-
-        let provider = Provider::with_id(
-            "p1".to_string(),
-            "First".to_string(),
-            json!({
-                "env": {
-                    "GEMINI_API_KEY": "token"
-                }
-            }),
-            None,
-        );
-
-        ProviderService::add(&state, AppType::Gemini, provider).expect("add should succeed");
-
-        let env = crate::gemini_config::read_gemini_env().expect("read gemini env");
-        assert_eq!(
-            env.get("CC_SWITCH_GEMINI_COMMON").map(String::as_str),
-            Some("1"),
-            "common snippet env key should be present in ~/.gemini/.env"
-        );
-        assert_eq!(
-            env.get("GEMINI_API_KEY").map(String::as_str),
-            Some("token"),
-            "provider env key should remain in ~/.gemini/.env"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn common_config_snippet_is_not_persisted_into_gemini_provider_snapshot_on_switch() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Gemini);
-        config.common_config_snippets.gemini =
-            Some(r#"{"env":{"CC_SWITCH_GEMINI_COMMON":"1"}}"#.to_string());
-
-        let state = state_from_config(config);
-
-        let p1 = Provider::with_id(
-            "p1".to_string(),
-            "First".to_string(),
-            json!({
-                "env": {
-                    "GEMINI_API_KEY": "token1"
-                }
-            }),
-            None,
-        );
-        let p2 = Provider::with_id(
-            "p2".to_string(),
-            "Second".to_string(),
-            json!({
-                "env": {
-                    "GEMINI_API_KEY": "token2"
-                }
-            }),
-            None,
-        );
-
-        ProviderService::add(&state, AppType::Gemini, p1).expect("add p1");
-        ProviderService::add(&state, AppType::Gemini, p2).expect("add p2");
-
-        ProviderService::switch(&state, AppType::Gemini, "p2").expect("switch to p2");
-
-        let cfg = state.config.read().expect("read config");
-        let manager = cfg.get_manager(&AppType::Gemini).expect("gemini manager");
-        let p1_after = manager.providers.get("p1").expect("p1 exists");
-
-        let env = p1_after
-            .settings_config
-            .get("env")
-            .and_then(Value::as_object)
-            .expect("provider env should be object");
-
-        assert!(
-            !env.contains_key("CC_SWITCH_GEMINI_COMMON"),
-            "common env keys should not be persisted into provider snapshot"
-        );
-        assert_eq!(
-            env.get("GEMINI_API_KEY").and_then(Value::as_str),
-            Some("token1"),
-            "provider-specific env should remain in snapshot"
-        );
-    }
-}
-
-fn merge_json_values(base: &mut Value, overlay: &Value) {
-    match (base, overlay) {
-        (Value::Object(base_map), Value::Object(overlay_map)) => {
-            for (key, overlay_value) in overlay_map {
-                match base_map.get_mut(key) {
-                    Some(base_value) => merge_json_values(base_value, overlay_value),
-                    None => {
-                        base_map.insert(key.clone(), overlay_value.clone());
-                    }
-                }
-            }
-        }
-        (base_value, overlay_value) => {
-            *base_value = overlay_value.clone();
-        }
-    }
-}
-
-fn strip_common_values(target: &mut Value, common: &Value) {
-    json_deep_remove(target, common);
-}
-
 impl ProviderService {
-    fn parse_common_claude_config_snippet(snippet: &str) -> Result<Value, AppError> {
+    fn parse_common_opencode_config_snippet(snippet: &str) -> Result<Value, AppError> {
         let value: Value = serde_json::from_str(snippet).map_err(|e| {
             AppError::localized(
-                "common_config.claude.invalid_json",
-                format!("Claude 通用配置片段不是有效的 JSON：{e}"),
-                format!("Claude common config snippet is not valid JSON: {e}"),
+                "common_config.opencode.invalid_json",
+                format!("OpenCode 通用配置片段不是有效的 JSON：{e}"),
+                format!("OpenCode common config snippet is not valid JSON: {e}"),
             )
         })?;
         if !value.is_object() {
             return Err(AppError::localized(
-                "common_config.claude.not_object",
-                "Claude 通用配置片段必须是 JSON 对象",
-                "Claude common config snippet must be a JSON object",
+                "common_config.opencode.not_object",
+                "OpenCode 通用配置片段必须是 JSON 对象",
+                "OpenCode common config snippet must be a JSON object",
             ));
         }
         Ok(value)
     }
 
-    fn parse_common_gemini_config_snippet(snippet: &str) -> Result<Value, AppError> {
-        let value: Value = serde_json::from_str(snippet).map_err(|e| {
-            AppError::localized(
-                "common_config.gemini.invalid_json",
-                format!("Gemini 通用配置片段不是有效的 JSON：{e}"),
-                format!("Gemini common config snippet is not valid JSON: {e}"),
-            )
-        })?;
-        if !value.is_object() {
-            return Err(AppError::localized(
-                "common_config.gemini.not_object",
-                "Gemini 通用配置片段必须是 JSON 对象",
-                "Gemini common config snippet must be a JSON object",
-            ));
-        }
-        Ok(value)
-    }
-
-    fn extract_codex_common_config_from_config_toml(config_toml: &str) -> Result<String, AppError> {
-        let config_toml = config_toml.trim();
-        if config_toml.is_empty() {
-            return Ok(String::new());
-        }
-
-        let mut doc = config_toml
-            .parse::<toml_edit::DocumentMut>()
-            .map_err(|e| AppError::Message(format!("TOML parse error: {e}")))?;
-
-        // Remove provider-specific fields.
-        let root = doc.as_table_mut();
-        root.remove("model");
-        root.remove("model_provider");
-        // Legacy/alt formats might use a top-level base_url.
-        root.remove("base_url");
-        // Remove entire model_providers table (provider-specific configuration)
-        root.remove("model_providers");
-
-        // Clean up multiple empty lines (keep at most one blank line).
-        let mut cleaned = String::new();
-        let mut blank_run = 0usize;
-        for line in doc.to_string().lines() {
-            if line.trim().is_empty() {
-                blank_run += 1;
-                if blank_run <= 1 {
-                    cleaned.push('\n');
-                }
-                continue;
-            }
-            blank_run = 0;
-            cleaned.push_str(line);
-            cleaned.push('\n');
-        }
-
-        Ok(cleaned.trim().to_string())
-    }
-
-    fn maybe_update_codex_common_config_snippet(
-        config: &mut MultiAppConfig,
-        config_toml: &str,
-    ) -> Result<(), AppError> {
-        let existing = config
-            .common_config_snippets
-            .codex
-            .as_deref()
-            .unwrap_or_default()
-            .trim();
-        if !existing.is_empty() {
-            return Ok(());
-        }
-
-        let extracted = Self::extract_codex_common_config_from_config_toml(config_toml)?;
-        if extracted.trim().is_empty() {
-            return Ok(());
-        }
-
-        config.common_config_snippets.codex = Some(extracted);
-        Ok(())
-    }
-
-    fn merge_toml_tables(dst: &mut toml_edit::Table, src: &toml_edit::Table) {
-        for (key, src_item) in src.iter() {
-            match (dst.get_mut(key), src_item.as_table()) {
-                (Some(dst_item), Some(src_table)) => {
-                    if let Some(dst_table) = dst_item.as_table_mut() {
-                        Self::merge_toml_tables(dst_table, src_table);
-                    } else {
-                        *dst_item = toml_edit::Item::Table(src_table.clone());
-                    }
-                }
-                (Some(dst_item), None) => {
-                    *dst_item = src_item.clone();
-                }
-                (None, _) => {
-                    dst.insert(key, src_item.clone());
-                }
-            }
-        }
-    }
-
-    fn strip_toml_tables(dst: &mut toml_edit::Table, src: &toml_edit::Table) {
-        for (key, src_item) in src.iter() {
-            let should_remove = if let Some(src_table) = src_item.as_table() {
-                match dst.get_mut(key) {
-                    Some(dst_item) => {
-                        if let Some(dst_table) = dst_item.as_table_mut() {
-                            Self::strip_toml_tables(dst_table, src_table);
-                            dst_table.is_empty()
-                        } else {
-                            true
-                        }
-                    }
-                    None => false,
-                }
-            } else {
-                dst.contains_key(key)
-            };
-
-            if should_remove {
-                dst.remove(key);
-            }
-        }
-    }
-
-    /// 归一化 Claude 模型键：读旧键(ANTHROPIC_SMALL_FAST_MODEL)，写新键(DEFAULT_*), 并删除旧键
-    fn normalize_claude_models_in_value(settings: &mut Value) -> bool {
-        let mut changed = false;
-        let env = match settings.get_mut("env") {
-            Some(v) if v.is_object() => v.as_object_mut().unwrap(),
-            _ => return changed,
-        };
-
-        let model = env
-            .get("ANTHROPIC_MODEL")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let small_fast = env
-            .get("ANTHROPIC_SMALL_FAST_MODEL")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let current_haiku = env
-            .get("ANTHROPIC_DEFAULT_HAIKU_MODEL")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let current_sonnet = env
-            .get("ANTHROPIC_DEFAULT_SONNET_MODEL")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let current_opus = env
-            .get("ANTHROPIC_DEFAULT_OPUS_MODEL")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let target_haiku = current_haiku
-            .or_else(|| small_fast.clone())
-            .or_else(|| model.clone());
-        let target_sonnet = current_sonnet
-            .or_else(|| model.clone())
-            .or_else(|| small_fast.clone());
-        let target_opus = current_opus
-            .or_else(|| model.clone())
-            .or_else(|| small_fast.clone());
-
-        if env.get("ANTHROPIC_DEFAULT_HAIKU_MODEL").is_none() {
-            if let Some(v) = target_haiku {
-                env.insert(
-                    "ANTHROPIC_DEFAULT_HAIKU_MODEL".to_string(),
-                    Value::String(v),
-                );
-                changed = true;
-            }
-        }
-        if env.get("ANTHROPIC_DEFAULT_SONNET_MODEL").is_none() {
-            if let Some(v) = target_sonnet {
-                env.insert(
-                    "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
-                    Value::String(v),
-                );
-                changed = true;
-            }
-        }
-        if env.get("ANTHROPIC_DEFAULT_OPUS_MODEL").is_none() {
-            if let Some(v) = target_opus {
-                env.insert("ANTHROPIC_DEFAULT_OPUS_MODEL".to_string(), Value::String(v));
-                changed = true;
-            }
-        }
-
-        if env.remove("ANTHROPIC_SMALL_FAST_MODEL").is_some() {
-            changed = true;
-        }
-
-        changed
-    }
-
-    fn normalize_provider_if_claude(app_type: &AppType, provider: &mut Provider) {
-        if matches!(app_type, AppType::Claude) {
-            let mut v = provider.settings_config.clone();
-            if Self::normalize_claude_models_in_value(&mut v) {
-                provider.settings_config = v;
-            }
-        }
-    }
     fn run_transaction<R, F>(state: &AppState, f: F) -> Result<R, AppError>
     where
         F: FnOnce(&mut MultiAppConfig) -> Result<(R, Option<PostCommitAction>), AppError>,
@@ -2800,7 +140,12 @@ impl ProviderService {
     }
 
     fn apply_post_commit(state: &AppState, action: &PostCommitAction) -> Result<(), AppError> {
-        let apply_common_config = preferred_apply_common_config(&action.provider);
+        let apply_common_config = action
+            .provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.apply_common_config)
+            .unwrap_or(true);
         if action.takeover_active {
             let backup_snapshot = Self::build_live_backup_snapshot(
                 &action.app_type,
@@ -2859,42 +204,21 @@ impl ProviderService {
                 let mut live_after = read_json_file::<Value>(&settings_path)?;
                 let _ = Self::normalize_claude_models_in_value(&mut live_after);
 
-                let (common_snippet, provider_uses_common) = {
+                let common_snippet = {
                     let guard = state.config.read().map_err(AppError::from)?;
-                    let snippet = guard.common_config_snippets.claude.clone();
-                    let uses_common = guard
-                        .get_manager(app_type)
-                        .and_then(|manager| manager.providers.get(provider_id))
-                        .is_some_and(|provider| {
-                            provider_uses_common_config(app_type, provider, snippet.as_deref())
-                        });
-                    (snippet, uses_common)
+                    guard.common_config_snippets.claude.clone()
                 };
-                if provider_uses_common {
-                    if let Some(snippet) = common_snippet.as_deref() {
-                        let snippet = snippet.trim();
-                        if !snippet.is_empty() {
-                            let common = Self::parse_common_claude_config_snippet(snippet)?;
-                            strip_common_values(&mut live_after, &common);
-                        }
+                if let Some(snippet) = common_snippet.as_deref() {
+                    let snippet = snippet.trim();
+                    if !snippet.is_empty() {
+                        let common = Self::parse_common_claude_config_snippet_for_strip(snippet)?;
+                        strip_common_values(&mut live_after, &common);
                     }
                 }
                 {
                     let mut guard = state.config.write().map_err(AppError::from)?;
                     if let Some(manager) = guard.get_manager_mut(app_type) {
                         if let Some(target) = manager.providers.get_mut(provider_id) {
-                            if provider_uses_common
-                                && target
-                                    .meta
-                                    .as_ref()
-                                    .and_then(|meta| meta.apply_common_config)
-                                    .is_none()
-                            {
-                                target
-                                    .meta
-                                    .get_or_insert_with(Default::default)
-                                    .apply_common_config = Some(true);
-                            }
                             target.settings_config = live_after;
                         }
                     }
@@ -2911,43 +235,53 @@ impl ProviderService {
                 let cfg_text = crate::codex_config::read_and_validate_codex_config_text()?;
                 let common_snippet_extracted =
                     Self::extract_codex_common_config_from_config_toml(&cfg_text)?;
+                let cfg_text_for_storage =
+                    Self::strip_codex_mcp_servers_from_snapshot_config(&cfg_text)?;
 
-                let (common_snippet_for_strip, provider_uses_common, explicit_apply_common) = {
+                let (provider, common_snippet_for_strip) = {
                     let guard = state.config.read().map_err(AppError::from)?;
-                    let snippet = guard.common_config_snippets.codex.clone();
-                    let provider = guard
-                        .get_manager(app_type)
-                        .and_then(|manager| manager.providers.get(provider_id));
-                    let explicit_apply_common = provider
-                        .and_then(|provider| provider.meta.as_ref())
-                        .and_then(|meta| meta.apply_common_config);
-                    let uses_common = provider.is_some_and(|provider| {
-                        provider_uses_common_config(app_type, provider, snippet.as_deref())
-                    });
-                    (snippet, uses_common, explicit_apply_common)
+                    (
+                        guard
+                            .get_manager(app_type)
+                            .and_then(|manager| manager.providers.get(provider_id))
+                            .cloned()
+                            .ok_or_else(|| {
+                                AppError::localized(
+                                    "provider.not_found",
+                                    format!("供应商不存在: {provider_id}"),
+                                    format!("Provider not found: {provider_id}"),
+                                )
+                            })?,
+                        guard.common_config_snippets.codex.clone(),
+                    )
                 };
-                let mut cfg_to_store = if provider_uses_common {
-                    strip_codex_common_config_from_full_text(
-                        &cfg_text,
-                        common_snippet_for_strip.as_deref().unwrap_or_default(),
-                    )?
+                let effective_common_snippet = if common_snippet_for_strip
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .is_empty()
+                    && !common_snippet_extracted.trim().is_empty()
+                {
+                    Some(common_snippet_extracted.clone())
                 } else {
-                    cfg_text.clone()
+                    common_snippet_for_strip.clone()
                 };
 
-                let synced_codex_mcp_server_ids = {
-                    let guard = state.config.read().map_err(AppError::from)?;
-                    synced_codex_mcp_server_ids(&guard)
-                };
-                cfg_to_store = strip_codex_synced_mcp_servers_from_full_text(
-                    &cfg_to_store,
-                    &synced_codex_mcp_server_ids,
+                let mut raw_settings = serde_json::Map::new();
+                if let Some(auth) = auth {
+                    raw_settings.insert("auth".to_string(), auth);
+                }
+                raw_settings.insert("config".to_string(), Value::String(cfg_text_for_storage));
+                let settings_to_store = Self::normalize_settings_config_for_storage(
+                    app_type,
+                    &provider,
+                    Value::Object(raw_settings),
+                    effective_common_snippet.as_deref(),
                 )?;
 
                 {
                     let mut guard = state.config.write().map_err(AppError::from)?;
-                    if explicit_apply_common != Some(false)
-                        && !common_snippet_extracted.trim().is_empty()
+                    if !common_snippet_extracted.trim().is_empty()
                         && guard
                             .common_config_snippets
                             .codex
@@ -2957,32 +291,15 @@ impl ProviderService {
                             .is_empty()
                     {
                         guard.common_config_snippets.codex = Some(common_snippet_extracted.clone());
+                        Self::normalize_existing_provider_snapshots_for_storage_best_effort(
+                            &mut guard,
+                            app_type,
+                            Some(common_snippet_extracted.as_str()),
+                        );
                     }
                     if let Some(manager) = guard.get_manager_mut(app_type) {
                         if let Some(target) = manager.providers.get_mut(provider_id) {
-                            if provider_uses_common
-                                && target
-                                    .meta
-                                    .as_ref()
-                                    .and_then(|meta| meta.apply_common_config)
-                                    .is_none()
-                            {
-                                target
-                                    .meta
-                                    .get_or_insert_with(Default::default)
-                                    .apply_common_config = Some(true);
-                            }
-                            let obj = target.settings_config.as_object_mut().ok_or_else(|| {
-                                AppError::Config(format!(
-                                    "供应商 {provider_id} 的 Codex 配置必须是 JSON 对象"
-                                ))
-                            })?;
-                            if let Some(auth) = auth {
-                                obj.insert("auth".to_string(), auth);
-                            } else {
-                                obj.remove("auth");
-                            }
-                            obj.insert("config".to_string(), Value::String(cfg_to_store.clone()));
+                            target.settings_config = settings_to_store.clone();
                         }
                     }
                 }
@@ -3015,43 +332,34 @@ impl ProviderService {
                     obj.insert("config".to_string(), config_value);
                 }
 
-                let (common_snippet, provider_uses_common) = {
+                let (provider, common_snippet) = {
                     let guard = state.config.read().map_err(AppError::from)?;
-                    let snippet = guard.common_config_snippets.gemini.clone();
-                    let uses_common = guard
-                        .get_manager(app_type)
-                        .and_then(|manager| manager.providers.get(provider_id))
-                        .is_some_and(|provider| {
-                            provider_uses_common_config(app_type, provider, snippet.as_deref())
-                        });
-                    (snippet, uses_common)
+                    (
+                        guard
+                            .get_manager(app_type)
+                            .and_then(|manager| manager.providers.get(provider_id))
+                            .cloned()
+                            .ok_or_else(|| {
+                                AppError::localized(
+                                    "provider.not_found",
+                                    format!("供应商不存在: {provider_id}"),
+                                    format!("Provider not found: {provider_id}"),
+                                )
+                            })?,
+                        guard.common_config_snippets.gemini.clone(),
+                    )
                 };
-                if provider_uses_common {
-                    if let Some(snippet) = common_snippet.as_deref() {
-                        let snippet = snippet.trim();
-                        if !snippet.is_empty() {
-                            let common = Self::parse_common_gemini_config_snippet(snippet)?;
-                            strip_common_values(&mut live_after, &common);
-                        }
-                    }
-                }
+                let live_after = Self::normalize_settings_config_for_storage(
+                    app_type,
+                    &provider,
+                    live_after,
+                    common_snippet.as_deref(),
+                )?;
 
                 {
                     let mut guard = state.config.write().map_err(AppError::from)?;
                     if let Some(manager) = guard.get_manager_mut(app_type) {
                         if let Some(target) = manager.providers.get_mut(provider_id) {
-                            if provider_uses_common
-                                && target
-                                    .meta
-                                    .as_ref()
-                                    .and_then(|meta| meta.apply_common_config)
-                                    .is_none()
-                            {
-                                target
-                                    .meta
-                                    .get_or_insert_with(Default::default)
-                                    .apply_common_config = Some(true);
-                            }
                             target.settings_config = live_after;
                         }
                     }
@@ -3106,6 +414,409 @@ impl ProviderService {
         live::capture_live_snapshot(app_type)
     }
 
+    fn validate_common_config_snippet(
+        app_type: &AppType,
+        snippet: Option<&str>,
+    ) -> Result<(), AppError> {
+        let Some(snippet) = snippet.map(str::trim) else {
+            return Ok(());
+        };
+        if snippet.is_empty() {
+            return Ok(());
+        }
+
+        match app_type {
+            AppType::Claude => {
+                Self::parse_common_claude_config_snippet(snippet)?;
+            }
+            AppType::Codex => {
+                snippet.parse::<toml_edit::DocumentMut>().map_err(|e| {
+                    AppError::Config(format!("Common config TOML parse error: {e}"))
+                })?;
+            }
+            AppType::Gemini => {
+                Self::parse_common_gemini_config_snippet(snippet)?;
+            }
+            AppType::OpenCode | AppType::OpenClaw => {
+                Self::parse_common_opencode_config_snippet(snippet)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn should_skip_common_config_migration_error(app_type: &AppType, err: &AppError) -> bool {
+        match (app_type, err) {
+            (AppType::Claude, AppError::Localized { key, .. }) => {
+                key.starts_with("common_config.claude.")
+            }
+            (AppType::Codex, AppError::Config(message)) => {
+                message.starts_with("Common config TOML parse error:")
+            }
+            (AppType::Gemini, AppError::Localized { key, .. }) => {
+                key.starts_with("common_config.gemini.")
+            }
+            _ => false,
+        }
+    }
+
+    fn migrate_old_common_config_snippet_best_effort(
+        config: &mut MultiAppConfig,
+        app_type: &AppType,
+        old_snippet: Option<&str>,
+    ) -> Result<(), AppError> {
+        let Some(old_snippet) = old_snippet.map(str::trim) else {
+            return Ok(());
+        };
+        if old_snippet.is_empty() {
+            return Ok(());
+        }
+
+        let result = match app_type {
+            AppType::Claude => Self::migrate_claude_common_config_snippet(config, old_snippet),
+            AppType::Codex => Self::migrate_codex_common_config_snippet(config, old_snippet),
+            AppType::Gemini => Self::migrate_gemini_common_config_snippet(config, old_snippet),
+            AppType::OpenCode | AppType::OpenClaw => Ok(()),
+        };
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(err) if Self::should_skip_common_config_migration_error(app_type, &err) => {
+                log::warn!(
+                    "skip migrating {app_type} provider snapshots from invalid stored common config snippet: {err}"
+                );
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn build_common_config_post_commit_action(
+        config: &mut MultiAppConfig,
+        app_type: &AppType,
+        takeover_active: bool,
+    ) -> Result<Option<PostCommitAction>, AppError> {
+        if app_type.is_additive_mode() {
+            return Ok(None);
+        }
+
+        let Some(current_provider_id) =
+            Self::self_heal_current_provider(config, app_type, "set_common_config_snippet")
+        else {
+            return Ok(None);
+        };
+
+        Self::build_post_commit_action_for_current_provider(
+            config,
+            app_type,
+            &current_provider_id,
+            takeover_active,
+        )
+    }
+
+    fn build_post_commit_action_for_current_provider(
+        config: &MultiAppConfig,
+        app_type: &AppType,
+        current_provider_id: &str,
+        takeover_active: bool,
+    ) -> Result<Option<PostCommitAction>, AppError> {
+        let provider = config
+            .get_manager(app_type)
+            .and_then(|manager| manager.providers.get(current_provider_id).cloned());
+
+        let Some(provider) = provider else {
+            return Ok(None);
+        };
+
+        Ok(Some(PostCommitAction {
+            app_type: app_type.clone(),
+            provider,
+            backup: Self::capture_live_snapshot(app_type)?,
+            sync_mcp: matches!(app_type, AppType::Codex) && !takeover_active,
+            refresh_snapshot: false,
+            common_config_snippet: config.common_config_snippets.get(app_type).cloned(),
+            takeover_active,
+        }))
+    }
+
+    fn resolve_live_apply_common_config(
+        app_type: &AppType,
+        provider: &Provider,
+        common_config_snippet: Option<&str>,
+        requested_apply_common_config: bool,
+    ) -> bool {
+        if !requested_apply_common_config {
+            return false;
+        }
+
+        if common_config_snippet
+            .map(str::trim)
+            .is_none_or(|snippet| snippet.is_empty())
+        {
+            return false;
+        }
+
+        match app_type {
+            AppType::Claude | AppType::Codex | AppType::Gemini => provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.apply_common_config)
+                .unwrap_or(true),
+            AppType::OpenCode | AppType::OpenClaw => false,
+        }
+    }
+
+    fn normalize_provider_for_storage(
+        app_type: &AppType,
+        provider: &mut Provider,
+        common_config_snippet: Option<&str>,
+    ) -> Result<(), AppError> {
+        match app_type {
+            AppType::Claude => {
+                Self::strip_common_claude_config_from_provider(provider, common_config_snippet)?;
+            }
+            AppType::Codex => {
+                Self::strip_common_codex_config_from_provider(provider, common_config_snippet)?;
+            }
+            AppType::Gemini => {
+                Self::strip_common_gemini_config_from_provider(provider, common_config_snippet)?;
+            }
+            AppType::OpenCode | AppType::OpenClaw => {}
+        }
+
+        Ok(())
+    }
+
+    fn normalize_settings_config_for_storage(
+        app_type: &AppType,
+        provider: &Provider,
+        settings_config: Value,
+        common_config_snippet: Option<&str>,
+    ) -> Result<Value, AppError> {
+        let mut snapshot_provider = provider.clone();
+        snapshot_provider.settings_config = settings_config;
+        Self::normalize_provider_for_storage(
+            app_type,
+            &mut snapshot_provider,
+            common_config_snippet,
+        )?;
+        Ok(snapshot_provider.settings_config)
+    }
+
+    fn normalize_existing_provider_snapshots_for_storage(
+        config: &mut MultiAppConfig,
+        app_type: &AppType,
+        common_config_snippet: Option<&str>,
+    ) -> Result<(), AppError> {
+        let Some(manager) = config.get_manager_mut(app_type) else {
+            return Ok(());
+        };
+
+        for provider in manager.providers.values_mut() {
+            Self::normalize_provider_for_storage(app_type, provider, common_config_snippet)?;
+        }
+
+        Ok(())
+    }
+
+    fn normalize_existing_provider_snapshots_for_storage_best_effort(
+        config: &mut MultiAppConfig,
+        app_type: &AppType,
+        common_config_snippet: Option<&str>,
+    ) {
+        let Some(manager) = config.get_manager_mut(app_type) else {
+            return;
+        };
+
+        for (provider_id, provider) in manager.providers.iter_mut() {
+            if let Err(err) =
+                Self::normalize_provider_for_storage(app_type, provider, common_config_snippet)
+            {
+                log::warn!(
+                    "skip normalizing {app_type} provider snapshot '{provider_id}' while applying auto-extracted common config: {err}"
+                );
+            }
+        }
+    }
+
+    fn normalize_existing_provider_snapshots_for_storage_strict_current_best_effort_others(
+        config: &mut MultiAppConfig,
+        app_type: &AppType,
+        common_config_snippet: Option<&str>,
+    ) -> Result<(), AppError> {
+        let Some(current_provider_id) = config.get_manager(app_type).and_then(|manager| {
+            if manager.current.is_empty() || !manager.providers.contains_key(&manager.current) {
+                None
+            } else {
+                Some(manager.current.clone())
+            }
+        }) else {
+            return Self::normalize_existing_provider_snapshots_for_storage(
+                config,
+                app_type,
+                common_config_snippet,
+            );
+        };
+
+        let Some(manager) = config.get_manager_mut(app_type) else {
+            return Ok(());
+        };
+
+        if let Some(current_provider) = manager.providers.get_mut(&current_provider_id) {
+            Self::normalize_provider_for_storage(
+                app_type,
+                current_provider,
+                common_config_snippet,
+            )?;
+        }
+
+        for (provider_id, provider) in manager.providers.iter_mut() {
+            if provider_id == &current_provider_id {
+                continue;
+            }
+
+            if let Err(err) =
+                Self::normalize_provider_for_storage(app_type, provider, common_config_snippet)
+            {
+                log::warn!(
+                    "skip normalizing {app_type} non-current provider snapshot '{provider_id}' while updating common config snippet: {err}"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn self_heal_current_provider(
+        config: &mut MultiAppConfig,
+        app_type: &AppType,
+        log_context: &str,
+    ) -> Option<String> {
+        let manager = config.get_manager_mut(app_type)?;
+
+        if manager.providers.is_empty() {
+            manager.current.clear();
+            return None;
+        }
+
+        if manager.current.is_empty() || !manager.providers.contains_key(&manager.current) {
+            let previous_current = manager.current.clone();
+            manager.current = Self::fallback_current_provider_id(manager);
+            if manager.current.is_empty() {
+                return None;
+            }
+            log::warn!(
+                "{log_context}: {app_type} current provider '{}' is invalid, self-healed to '{}'",
+                previous_current,
+                manager.current
+            );
+        }
+
+        Some(manager.current.clone())
+    }
+
+    fn fallback_current_provider_id(manager: &ProviderManager) -> String {
+        let mut provider_list: Vec<_> = manager.providers.iter().collect();
+        provider_list.sort_by(|(_, a), (_, b)| match (a.sort_index, b.sort_index) {
+            (Some(idx_a), Some(idx_b)) => idx_a.cmp(&idx_b),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.created_at.cmp(&b.created_at),
+        });
+
+        provider_list
+            .first()
+            .map(|(id, _)| (*id).clone())
+            .unwrap_or_default()
+    }
+
+    pub fn set_common_config_snippet(
+        state: &AppState,
+        app_type: AppType,
+        snippet: Option<String>,
+    ) -> Result<(), AppError> {
+        let normalized_snippet = snippet.and_then(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        Self::validate_common_config_snippet(&app_type, normalized_snippet.as_deref())?;
+
+        let app_type_clone = app_type.clone();
+        let takeover_active = if app_type.is_additive_mode() {
+            false
+        } else {
+            let is_running = state
+                .proxy_service
+                .is_running_blocking()
+                .map_err(AppError::Message)?;
+            if !is_running {
+                false
+            } else {
+                state
+                    .proxy_service
+                    .is_app_takeover_active_blocking(&app_type)
+                    .map_err(AppError::Message)?
+            }
+        };
+
+        Self::run_transaction(state, move |config| {
+            config.ensure_app(&app_type_clone);
+
+            if !app_type_clone.is_additive_mode() {
+                Self::self_heal_current_provider(
+                    config,
+                    &app_type_clone,
+                    "set_common_config_snippet",
+                );
+            }
+
+            let old_snippet = config
+                .common_config_snippets
+                .get(&app_type_clone)
+                .cloned()
+                .filter(|value| !value.trim().is_empty());
+
+            Self::migrate_old_common_config_snippet_best_effort(
+                config,
+                &app_type_clone,
+                old_snippet.as_deref(),
+            )?;
+
+            config
+                .common_config_snippets
+                .set(&app_type_clone, normalized_snippet.clone());
+
+            if matches!(
+                app_type_clone,
+                AppType::Claude | AppType::Codex | AppType::Gemini
+            ) {
+                Self::normalize_existing_provider_snapshots_for_storage_strict_current_best_effort_others(
+                    config,
+                    &app_type_clone,
+                    normalized_snippet.as_deref(),
+                )?;
+            }
+
+            let action = Self::build_common_config_post_commit_action(
+                config,
+                &app_type_clone,
+                takeover_active,
+            )?;
+            Ok(((), action))
+        })
+    }
+
+    pub fn clear_common_config_snippet(
+        state: &AppState,
+        app_type: AppType,
+    ) -> Result<(), AppError> {
+        Self::set_common_config_snippet(state, app_type, None)
+    }
+
     /// 列出指定应用下的所有供应商
     pub fn list(
         state: &AppState,
@@ -3145,18 +856,7 @@ impl ProviderService {
                 return Ok((manager.current.clone(), None));
             }
 
-            let mut provider_list: Vec<_> = manager.providers.iter().collect();
-            provider_list.sort_by(|(_, a), (_, b)| match (a.sort_index, b.sort_index) {
-                (Some(idx_a), Some(idx_b)) => idx_a.cmp(&idx_b),
-                (Some(_), None) => std::cmp::Ordering::Less,
-                (None, Some(_)) => std::cmp::Ordering::Greater,
-                (None, None) => a.created_at.cmp(&b.created_at),
-            });
-
-            manager.current = provider_list
-                .first()
-                .map(|(id, _)| (*id).clone())
-                .unwrap_or_default();
+            manager.current = Self::fallback_current_provider_id(manager);
 
             Ok((manager.current.clone(), None))
         })
@@ -3170,16 +870,27 @@ impl ProviderService {
         Self::validate_provider_settings(&app_type, &provider)?;
 
         let app_type_clone = app_type.clone();
-        let mut provider_clone = provider.clone();
-        if provider_clone.meta.is_none() && !app_type_clone.is_additive_mode() {
-            provider_clone.meta = Some(crate::provider::ProviderMeta {
-                apply_common_config: Some(true),
-                ..Default::default()
-            });
-        }
+        let provider_clone = provider.clone();
 
         Self::run_transaction(state, move |config| {
+            let common_config_snippet = config.common_config_snippets.get(&app_type_clone).cloned();
+            let mut provider_to_store = provider_clone.clone();
+            Self::normalize_provider_for_storage(
+                &app_type_clone,
+                &mut provider_to_store,
+                common_config_snippet.as_deref(),
+            )?;
+
             config.ensure_app(&app_type_clone);
+            let previous_current = config
+                .get_manager(&app_type_clone)
+                .map(|manager| manager.current.clone())
+                .unwrap_or_default();
+            let healed_current = if !app_type_clone.is_additive_mode() {
+                Self::self_heal_current_provider(config, &app_type_clone, "add")
+            } else {
+                None
+            };
             let manager = config
                 .get_manager_mut(&app_type_clone)
                 .ok_or_else(|| Self::app_not_found(&app_type_clone))?;
@@ -3187,27 +898,41 @@ impl ProviderService {
             let was_empty = manager.providers.is_empty();
             manager
                 .providers
-                .insert(provider_clone.id.clone(), provider_clone.clone());
+                .insert(provider_to_store.id.clone(), provider_to_store.clone());
 
             if !app_type_clone.is_additive_mode() && was_empty && manager.current.is_empty() {
-                manager.current = provider_clone.id.clone();
+                manager.current = provider_to_store.id.clone();
             }
 
             let is_current =
-                app_type_clone.is_additive_mode() || manager.current == provider_clone.id;
+                app_type_clone.is_additive_mode() || manager.current == provider_to_store.id;
+            let current_was_healed = !app_type_clone.is_additive_mode()
+                && healed_current.as_deref() != Some(previous_current.as_str());
+            let current_provider_id = if current_was_healed && !is_current {
+                Some(manager.current.clone())
+            } else {
+                None
+            };
             let action = if is_current {
                 let backup = Self::capture_live_snapshot(&app_type_clone)?;
-                let common_config_snippet =
-                    config.common_config_snippets.get(&app_type_clone).cloned();
                 Some(PostCommitAction {
                     app_type: app_type_clone.clone(),
-                    provider: provider_clone.clone(),
+                    provider: provider_to_store.clone(),
                     backup,
-                    sync_mcp: false,
+                    // Codex current-provider saves rewrite live config from the stored snapshot,
+                    // so managed MCP must be synced back after the write.
+                    sync_mcp: matches!(&app_type_clone, AppType::Codex),
                     refresh_snapshot: false,
                     common_config_snippet,
                     takeover_active: false,
                 })
+            } else if let Some(current_provider_id) = current_provider_id {
+                Self::build_post_commit_action_for_current_provider(
+                    config,
+                    &app_type_clone,
+                    &current_provider_id,
+                    false,
+                )?
             } else {
                 None
             };
@@ -3231,6 +956,16 @@ impl ProviderService {
         let provider_clone = provider.clone();
 
         Self::run_transaction(state, move |config| {
+            let common_config_snippet = config.common_config_snippets.get(&app_type_clone).cloned();
+            let previous_current = config
+                .get_manager(&app_type_clone)
+                .map(|manager| manager.current.clone())
+                .unwrap_or_default();
+            let healed_current = if !app_type_clone.is_additive_mode() {
+                Self::self_heal_current_provider(config, &app_type_clone, "update")
+            } else {
+                None
+            };
             let manager = config
                 .get_manager_mut(&app_type_clone)
                 .ok_or_else(|| Self::app_not_found(&app_type_clone))?;
@@ -3244,7 +979,7 @@ impl ProviderService {
             }
 
             let is_current = app_type_clone.is_additive_mode() || manager.current == provider_id;
-            let merged = if let Some(existing) = manager.providers.get(&provider_id) {
+            let mut merged = if let Some(existing) = manager.providers.get(&provider_id) {
                 let mut updated = provider_clone.clone();
                 match (existing.meta.as_ref(), updated.meta.take()) {
                     // 前端未提供 meta，表示不修改，沿用旧值
@@ -3264,23 +999,43 @@ impl ProviderService {
                 provider_clone.clone()
             };
 
+            Self::normalize_provider_for_storage(
+                &app_type_clone,
+                &mut merged,
+                common_config_snippet.as_deref(),
+            )?;
+
             manager
                 .providers
                 .insert(provider_id.clone(), merged.clone());
 
+            let current_was_healed = !app_type_clone.is_additive_mode()
+                && healed_current.as_deref() != Some(previous_current.as_str());
+            let current_provider_id = if current_was_healed && !is_current {
+                Some(manager.current.clone())
+            } else {
+                None
+            };
             let action = if is_current {
                 let backup = Self::capture_live_snapshot(&app_type_clone)?;
-                let common_config_snippet =
-                    config.common_config_snippets.get(&app_type_clone).cloned();
                 Some(PostCommitAction {
                     app_type: app_type_clone.clone(),
-                    provider: merged.clone(),
+                    provider: merged,
                     backup,
-                    sync_mcp: false,
-                    refresh_snapshot: !app_type_clone.is_additive_mode(),
+                    // Codex current-provider saves rewrite live config from the stored snapshot,
+                    // so managed MCP must be synced back after the write.
+                    sync_mcp: matches!(&app_type_clone, AppType::Codex),
+                    refresh_snapshot: false,
                     common_config_snippet,
                     takeover_active: false,
                 })
+            } else if let Some(current_provider_id) = current_provider_id {
+                Self::build_post_commit_action_for_current_provider(
+                    config,
+                    &app_type_clone,
+                    &current_provider_id,
+                    false,
+                )?
             } else {
                 None
             };
@@ -3292,10 +1047,10 @@ impl ProviderService {
     /// 导入当前 live 配置为默认供应商
     pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<(), AppError> {
         if app_type.is_additive_mode() {
-            return Ok(());
-        }
+            if matches!(app_type, AppType::OpenClaw) {
+                return Ok(());
+            }
 
-        if matches!(app_type, AppType::OpenCode) {
             let providers = crate::opencode_config::get_providers()?;
             if providers.is_empty() {
                 return Ok(());
@@ -3410,8 +1165,20 @@ impl ProviderService {
         );
         provider.category = Some("custom".to_string());
 
+        let common_config_snippet = {
+            let config = state.config.read().map_err(AppError::from)?;
+            config.common_config_snippets.get(&app_type).cloned()
+        };
+        provider.settings_config = Self::normalize_settings_config_for_storage(
+            &app_type,
+            &provider,
+            provider.settings_config.clone(),
+            common_config_snippet.as_deref(),
+        )?;
+
         {
             let mut config = state.config.write().map_err(AppError::from)?;
+            config.ensure_app(&app_type);
             let manager = config
                 .get_manager_mut(&app_type)
                 .ok_or_else(|| Self::app_not_found(&app_type))?;
@@ -3430,16 +1197,25 @@ impl ProviderService {
         match app_type {
             AppType::Codex => {
                 let auth_path = get_codex_auth_path();
-                if !auth_path.exists() {
+                let config_path = get_codex_config_path();
+                if !config_path.exists() {
                     return Err(AppError::localized(
-                        "codex.auth.missing",
-                        "Codex 配置文件不存在：缺少 auth.json",
-                        "Codex configuration missing: auth.json not found",
+                        "codex.live.missing",
+                        "Codex 配置文件不存在",
+                        "Codex configuration is missing",
                     ));
                 }
-                let auth: Value = read_json_file(&auth_path)?;
-                let cfg_text = crate::codex_config::read_and_validate_codex_config_text()?;
-                Ok(json!({ "auth": auth, "config": cfg_text }))
+
+                let mut live_settings = serde_json::Map::new();
+                if auth_path.exists() {
+                    live_settings.insert("auth".to_string(), read_json_file(&auth_path)?);
+                }
+                if config_path.exists() {
+                    let cfg_text = crate::codex_config::read_and_validate_codex_config_text()?;
+                    live_settings.insert("config".to_string(), Value::String(cfg_text));
+                }
+
+                Ok(Value::Object(live_settings))
             }
             AppType::Claude => {
                 let path = get_claude_settings_path();
@@ -3704,623 +1480,13 @@ impl ProviderService {
         })
     }
 
-    fn prepare_switch_codex(
-        config: &mut MultiAppConfig,
-        provider_id: &str,
-    ) -> Result<Provider, AppError> {
-        let provider = config
-            .get_manager(&AppType::Codex)
-            .ok_or_else(|| Self::app_not_found(&AppType::Codex))?
-            .providers
-            .get(provider_id)
-            .cloned()
-            .ok_or_else(|| {
-                AppError::localized(
-                    "provider.not_found",
-                    format!("供应商不存在: {provider_id}"),
-                    format!("Provider not found: {provider_id}"),
-                )
-            })?;
-
-        Self::backfill_codex_current(config, provider_id)?;
-
-        if let Some(manager) = config.get_manager_mut(&AppType::Codex) {
-            manager.current = provider_id.to_string();
-        }
-
-        Ok(provider)
-    }
-
-    fn backfill_codex_current(
-        config: &mut MultiAppConfig,
-        next_provider: &str,
-    ) -> Result<(), AppError> {
-        let current_id = config
-            .get_manager(&AppType::Codex)
-            .map(|m| m.current.clone())
-            .unwrap_or_default();
-
-        if current_id.is_empty() || current_id == next_provider {
-            return Ok(());
-        }
-
-        let auth_path = get_codex_auth_path();
-        let config_path = get_codex_config_path();
-        if !auth_path.exists() && !config_path.exists() {
-            return Ok(());
-        }
-
-        let auth = if auth_path.exists() {
-            Some(read_json_file::<Value>(&auth_path)?)
-        } else {
-            None
-        };
-
-        // Align with upstream: store the FULL config.toml text, not a snippet.
-        // This preserves all fields (model_reasoning_effort, disable_response_storage, etc.)
-        // and avoids lossy round-trips through snippet extraction.
-        let (config_text, provider_uses_common) = if config_path.exists() {
-            let text =
-                std::fs::read_to_string(&config_path).map_err(|e| AppError::io(&config_path, e))?;
-            let explicit_apply_common = config
-                .get_manager(&AppType::Codex)
-                .and_then(|manager| manager.providers.get(&current_id))
-                .and_then(|provider| provider.meta.as_ref())
-                .and_then(|meta| meta.apply_common_config);
-
-            if explicit_apply_common != Some(false) {
-                Self::maybe_update_codex_common_config_snippet(config, &text)?;
-            }
-
-            let common_snippet = config.common_config_snippets.codex.clone();
-            let provider_uses_common = explicit_apply_common != Some(false)
-                && config
-                    .get_manager(&AppType::Codex)
-                    .and_then(|manager| manager.providers.get(&current_id))
-                    .is_some_and(|provider| {
-                        provider_uses_common_config(
-                            &AppType::Codex,
-                            provider,
-                            common_snippet.as_deref(),
-                        )
-                    });
-
-            if provider_uses_common {
-                let stripped = strip_codex_common_config_from_full_text(
-                    &text,
-                    common_snippet.as_deref().unwrap_or_default(),
-                )?;
-                (Some(stripped), true)
-            } else {
-                (Some(text), false)
-            }
-        } else {
-            (None, false)
-        };
-
-        let synced_codex_mcp_server_ids = synced_codex_mcp_server_ids(config);
-
-        if let Some(manager) = config.get_manager_mut(&AppType::Codex) {
-            if let Some(current) = manager.providers.get_mut(&current_id) {
-                if !current.settings_config.is_object() {
-                    current.settings_config = json!({});
-                }
-
-                if provider_uses_common
-                    && current
-                        .meta
-                        .as_ref()
-                        .and_then(|meta| meta.apply_common_config)
-                        .is_none()
-                {
-                    current
-                        .meta
-                        .get_or_insert_with(Default::default)
-                        .apply_common_config = Some(true);
-                }
-
-                let obj = current.settings_config.as_object_mut().unwrap();
-                if let Some(auth) = auth {
-                    obj.insert("auth".to_string(), auth);
-                }
-                if let Some(config_text) = config_text {
-                    let config_text = strip_codex_synced_mcp_servers_from_full_text(
-                        &config_text,
-                        &synced_codex_mcp_server_ids,
-                    )?;
-                    obj.insert("config".to_string(), Value::String(config_text));
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Write Codex live configuration.
-    ///
-    /// Aligned with upstream: the stored `settings_config.config` is the full config.toml text.
-    /// We write it directly to `~/.codex/config.toml`, optionally merging the common config snippet.
-    /// Auth is handled separately via auth.json.
-    fn write_codex_live(
-        provider: &Provider,
-        common_config_snippet: Option<&str>,
-        apply_common_config: bool,
-    ) -> Result<(), AppError> {
-        if !crate::sync_policy::should_sync_live(&AppType::Codex) {
-            return Ok(());
-        }
-
-        let settings = provider
-            .settings_config
-            .as_object()
-            .ok_or_else(|| AppError::Config("Codex 配置必须是 JSON 对象".into()))?;
-
-        // auth 字段现在是可选的（Codex 0.64+ 使用环境变量）
-        let auth = settings.get("auth");
-        let auth_is_empty = auth
-            .map(|a| a.as_object().map(|o| o.is_empty()).unwrap_or(true))
-            .unwrap_or(true);
-
-        // 获取存储的 config TOML 文本
-        let cfg_text = settings.get("config").and_then(Value::as_str).unwrap_or("");
-
-        // For official OpenAI providers, ensure wire_api and requires_openai_auth
-        // have sensible defaults in the model_providers section.
-        let cfg_text_owned;
-        let cfg_text = if is_codex_official_provider(provider) && !cfg_text.trim().is_empty() {
-            if let Ok(mut doc) = cfg_text.parse::<toml_edit::DocumentMut>() {
-                let mp_key = doc
-                    .get("model_provider")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                if let Some(key) = mp_key {
-                    if let Some(section) = doc
-                        .get_mut("model_providers")
-                        .and_then(|v| v.as_table_like_mut())
-                        .and_then(|t| t.get_mut(&key))
-                        .and_then(|v| v.as_table_like_mut())
-                    {
-                        if section.get("wire_api").is_none() {
-                            section.insert("wire_api", toml_edit::value("responses"));
-                        }
-                        if section.get("requires_openai_auth").is_none() {
-                            section.insert("requires_openai_auth", toml_edit::value(true));
-                        }
-                    }
-                }
-                cfg_text_owned = doc.to_string();
-                &cfg_text_owned
-            } else {
-                cfg_text
-            }
-        } else {
-            cfg_text
-        };
-
-        // Validate TOML before writing
-        if !cfg_text.trim().is_empty() {
-            crate::codex_config::validate_config_toml(cfg_text)?;
-        }
-
-        // Merge common config snippet if applicable
-        let final_text = if apply_common_config {
-            if let Some(snippet) = common_config_snippet {
-                let snippet = snippet.trim();
-                if !snippet.is_empty() && !cfg_text.trim().is_empty() {
-                    // Parse both as TOML documents and merge
-                    let mut doc = cfg_text
-                        .parse::<toml_edit::DocumentMut>()
-                        .map_err(|e| AppError::Config(format!("TOML parse error: {e}")))?;
-                    let common_doc = snippet.parse::<toml_edit::DocumentMut>().map_err(|e| {
-                        AppError::Config(format!("Common config TOML parse error: {e}"))
-                    })?;
-                    Self::merge_toml_tables(doc.as_table_mut(), common_doc.as_table());
-                    doc.to_string()
-                } else {
-                    cfg_text.to_string()
-                }
-            } else {
-                cfg_text.to_string()
-            }
-        } else {
-            cfg_text.to_string()
-        };
-
-        // Write config.toml
-        let config_path = get_codex_config_path();
-        if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
-        }
-        crate::config::write_text_file(&config_path, &final_text)?;
-
-        // auth.json handling:
-        //
-        // Codex has two auth modes:
-        // - API Key mode (auth.json): third-party/custom providers that explicitly carry auth.
-        // - Credential store / OpenAI official mode: auth.json must be absent, otherwise it
-        //   overrides the credential store.
-        //
-        // Align with upstream UI behavior:
-        // - If provider has no auth (or is explicitly marked as official), remove existing auth.json.
-        // - Otherwise, write auth.json from provider.auth.
-        let auth_path = get_codex_auth_path();
-        let should_remove_auth_json = auth_is_empty || is_codex_official_provider(provider);
-        if should_remove_auth_json {
-            if auth_path.exists() {
-                let ts = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos();
-                let backup_path = auth_path.with_file_name(format!("auth.json.cc-switch.bak.{ts}"));
-                copy_file(&auth_path, &backup_path)?;
-                delete_file(&auth_path)?;
-            }
-        } else if let Some(auth_value) = auth {
-            write_json_file(&auth_path, auth_value)?;
-        }
-
-        Ok(())
-    }
-
-    fn prepare_switch_claude(
-        config: &mut MultiAppConfig,
-        provider_id: &str,
-    ) -> Result<Provider, AppError> {
-        let provider = config
-            .get_manager(&AppType::Claude)
-            .ok_or_else(|| Self::app_not_found(&AppType::Claude))?
-            .providers
-            .get(provider_id)
-            .cloned()
-            .ok_or_else(|| {
-                AppError::localized(
-                    "provider.not_found",
-                    format!("供应商不存在: {provider_id}"),
-                    format!("Provider not found: {provider_id}"),
-                )
-            })?;
-
-        Self::backfill_claude_current(config, provider_id)?;
-
-        if let Some(manager) = config.get_manager_mut(&AppType::Claude) {
-            manager.current = provider_id.to_string();
-        }
-
-        Ok(provider)
-    }
-
-    fn prepare_switch_gemini(
-        config: &mut MultiAppConfig,
-        provider_id: &str,
-    ) -> Result<Provider, AppError> {
-        let provider = config
-            .get_manager(&AppType::Gemini)
-            .ok_or_else(|| Self::app_not_found(&AppType::Gemini))?
-            .providers
-            .get(provider_id)
-            .cloned()
-            .ok_or_else(|| {
-                AppError::localized(
-                    "provider.not_found",
-                    format!("供应商不存在: {provider_id}"),
-                    format!("Provider not found: {provider_id}"),
-                )
-            })?;
-
-        Self::backfill_gemini_current(config, provider_id)?;
-
-        if let Some(manager) = config.get_manager_mut(&AppType::Gemini) {
-            manager.current = provider_id.to_string();
-        }
-
-        Ok(provider)
-    }
-
-    fn backfill_claude_current(
-        config: &mut MultiAppConfig,
-        next_provider: &str,
-    ) -> Result<(), AppError> {
-        let settings_path = get_claude_settings_path();
-        if !settings_path.exists() {
-            return Ok(());
-        }
-
-        let current_id = config
-            .get_manager(&AppType::Claude)
-            .map(|m| m.current.clone())
-            .unwrap_or_default();
-        if current_id.is_empty() || current_id == next_provider {
-            return Ok(());
-        }
-
-        let mut live = read_json_file::<Value>(&settings_path)?;
-        let _ = Self::normalize_claude_models_in_value(&mut live);
-        let (common_snippet, provider_uses_common) = {
-            let snippet = config.common_config_snippets.claude.clone();
-            let uses_common = config
-                .get_manager(&AppType::Claude)
-                .and_then(|manager| manager.providers.get(&current_id))
-                .is_some_and(|provider| {
-                    provider_uses_common_config(&AppType::Claude, provider, snippet.as_deref())
-                });
-            (snippet, uses_common)
-        };
-        if provider_uses_common {
-            if let Some(snippet) = common_snippet.as_deref() {
-                let snippet = snippet.trim();
-                if !snippet.is_empty() {
-                    let common = Self::parse_common_claude_config_snippet(snippet)?;
-                    strip_common_values(&mut live, &common);
-                }
-            }
-        }
-        if let Some(manager) = config.get_manager_mut(&AppType::Claude) {
-            if let Some(current) = manager.providers.get_mut(&current_id) {
-                if provider_uses_common
-                    && current
-                        .meta
-                        .as_ref()
-                        .and_then(|meta| meta.apply_common_config)
-                        .is_none()
-                {
-                    current
-                        .meta
-                        .get_or_insert_with(Default::default)
-                        .apply_common_config = Some(true);
-                }
-                current.settings_config = live;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn backfill_gemini_current(
-        config: &mut MultiAppConfig,
-        next_provider: &str,
-    ) -> Result<(), AppError> {
-        use crate::gemini_config::{
-            env_to_json, get_gemini_env_path, get_gemini_settings_path, read_gemini_env,
-        };
-
-        let env_path = get_gemini_env_path();
-        if !env_path.exists() {
-            return Ok(());
-        }
-
-        let current_id = config
-            .get_manager(&AppType::Gemini)
-            .map(|m| m.current.clone())
-            .unwrap_or_default();
-        if current_id.is_empty() || current_id == next_provider {
-            return Ok(());
-        }
-
-        let env_map = read_gemini_env()?;
-        let mut live = env_to_json(&env_map);
-
-        let settings_path = get_gemini_settings_path();
-        let config_value = if settings_path.exists() {
-            read_json_file(&settings_path)?
-        } else {
-            json!({})
-        };
-        if let Some(obj) = live.as_object_mut() {
-            obj.insert("config".to_string(), config_value);
-        }
-
-        let (common_snippet, provider_uses_common) = {
-            let snippet = config.common_config_snippets.gemini.clone();
-            let uses_common = config
-                .get_manager(&AppType::Gemini)
-                .and_then(|manager| manager.providers.get(&current_id))
-                .is_some_and(|provider| {
-                    provider_uses_common_config(&AppType::Gemini, provider, snippet.as_deref())
-                });
-            (snippet, uses_common)
-        };
-        if provider_uses_common {
-            if let Some(snippet) = common_snippet.as_deref() {
-                let snippet = snippet.trim();
-                if !snippet.is_empty() {
-                    let common = Self::parse_common_gemini_config_snippet(snippet)?;
-                    strip_common_values(&mut live, &common);
-                }
-            }
-        }
-
-        if let Some(manager) = config.get_manager_mut(&AppType::Gemini) {
-            if let Some(current) = manager.providers.get_mut(&current_id) {
-                if provider_uses_common
-                    && current
-                        .meta
-                        .as_ref()
-                        .and_then(|meta| meta.apply_common_config)
-                        .is_none()
-                {
-                    current
-                        .meta
-                        .get_or_insert_with(Default::default)
-                        .apply_common_config = Some(true);
-                }
-                current.settings_config = live;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn write_claude_live(
-        provider: &Provider,
-        common_config_snippet: Option<&str>,
-    ) -> Result<(), AppError> {
-        if !crate::sync_policy::should_sync_live(&AppType::Claude) {
-            return Ok(());
-        }
-
-        let settings_path = get_claude_settings_path();
-        let mut provider_content = provider.settings_config.clone();
-        let _ = Self::normalize_claude_models_in_value(&mut provider_content);
-
-        let content_to_write = if let Some(snippet) = common_config_snippet {
-            let snippet = snippet.trim();
-            if snippet.is_empty() {
-                provider_content
-            } else {
-                let common = Self::parse_common_claude_config_snippet(snippet)?;
-                let mut merged = common;
-                merge_json_values(&mut merged, &provider_content);
-                let _ = Self::normalize_claude_models_in_value(&mut merged);
-                merged
-            }
-        } else {
-            provider_content
-        };
-
-        write_json_file(&settings_path, &content_to_write)?;
-        Ok(())
-    }
-
-    pub(crate) fn write_gemini_live(
-        provider: &Provider,
-        common_config_snippet: Option<&str>,
-    ) -> Result<(), AppError> {
-        Self::write_gemini_live_impl(provider, common_config_snippet, false)
-    }
-
-    pub(crate) fn write_gemini_live_force(
-        provider: &Provider,
-        common_config_snippet: Option<&str>,
-    ) -> Result<(), AppError> {
-        Self::write_gemini_live_impl(provider, common_config_snippet, true)
-    }
-
-    fn write_gemini_live_impl(
-        provider: &Provider,
-        common_config_snippet: Option<&str>,
-        force_sync: bool,
-    ) -> Result<(), AppError> {
-        use crate::gemini_config::{
-            get_gemini_settings_path, json_to_env, validate_gemini_settings_strict,
-            write_gemini_env_atomic,
-        };
-
-        // 一次性检测认证类型，避免重复检测
-        let auth_type = Self::detect_gemini_auth_type(provider);
-
-        if !force_sync && !crate::sync_policy::should_sync_live(&AppType::Gemini) {
-            // still update CC-Switch app-level settings, but do not create any ~/.gemini files
-            match auth_type {
-                GeminiAuthType::GoogleOfficial => {
-                    Self::ensure_google_oauth_security_flag(provider)?
-                }
-                GeminiAuthType::ApiKey => Self::ensure_api_key_security_flag(provider)?,
-            }
-            return Ok(());
-        }
-
-        let provider_content = provider.settings_config.clone();
-        let content_to_write = if let Some(snippet) = common_config_snippet {
-            let snippet = snippet.trim();
-            if snippet.is_empty() {
-                provider_content
-            } else {
-                let common = Self::parse_common_gemini_config_snippet(snippet)?;
-                let mut merged = common;
-                merge_json_values(&mut merged, &provider_content);
-                merged
-            }
-        } else {
-            provider_content
-        };
-
-        let mut env_map = json_to_env(&content_to_write)?;
-
-        // 准备要写入 ~/.gemini/settings.json 的配置（缺省时保留现有文件内容）
-        let settings_path = get_gemini_settings_path();
-        let mut config_to_write = if let Some(config_value) = content_to_write.get("config") {
-            if config_value.is_null() {
-                None // null → 保留现有文件
-            } else if let Some(provider_config) = config_value.as_object() {
-                if provider_config.is_empty() {
-                    None // 空对象 {} → 保留现有文件
-                } else {
-                    // 有内容 → 合并到现有 settings.json（保留现有 key，如 mcpServers），供应商优先
-                    let mut merged = if settings_path.exists() {
-                        read_json_file(&settings_path)?
-                    } else {
-                        json!({})
-                    };
-
-                    if !merged.is_object() {
-                        merged = json!({});
-                    }
-
-                    let merged_map = merged.as_object_mut().ok_or_else(|| {
-                        AppError::localized(
-                            "gemini.validation.invalid_settings",
-                            "Gemini 现有 settings.json 格式错误: 必须是对象",
-                            "Gemini existing settings.json invalid: must be a JSON object",
-                        )
-                    })?;
-                    for (key, value) in provider_config {
-                        merged_map.insert(key.clone(), value.clone());
-                    }
-
-                    Some(merged)
-                }
-            } else {
-                return Err(AppError::localized(
-                    "gemini.validation.invalid_config",
-                    "Gemini 配置格式错误: config 必须是对象或 null",
-                    "Gemini config invalid: config must be an object or null",
-                ));
-            }
-        } else {
-            None
-        };
-
-        if config_to_write.is_none() {
-            if settings_path.exists() {
-                config_to_write = Some(read_json_file(&settings_path)?);
-            } else {
-                config_to_write = Some(json!({})); // 新建空配置
-            }
-        }
-
-        match auth_type {
-            GeminiAuthType::GoogleOfficial => {
-                // Google 官方使用 OAuth，清空 env
-                env_map.clear();
-                write_gemini_env_atomic(&env_map)?;
-            }
-            GeminiAuthType::ApiKey => {
-                // API Key 供应商（所有第三方服务）
-                // 统一处理：验证配置 + 写入 .env 文件
-                validate_gemini_settings_strict(&content_to_write)?;
-                write_gemini_env_atomic(&env_map)?;
-            }
-        }
-
-        if let Some(config_value) = config_to_write {
-            write_json_file(&settings_path, &config_value)?;
-        }
-
-        match auth_type {
-            GeminiAuthType::GoogleOfficial => Self::ensure_google_oauth_security_flag(provider)?,
-            GeminiAuthType::ApiKey => Self::ensure_api_key_security_flag(provider)?,
-        }
-
-        Ok(())
-    }
-
     fn write_live_snapshot(
         app_type: &AppType,
         provider: &Provider,
         common_config_snippet: Option<&str>,
         apply_common_config: bool,
     ) -> Result<(), AppError> {
-        let apply_common_config = resolve_live_apply_common_config(
+        let apply_common_config = Self::resolve_live_apply_common_config(
             app_type,
             provider,
             common_config_snippet,
@@ -4395,7 +1561,7 @@ impl ProviderService {
         common_config_snippet: Option<&str>,
         apply_common_config: bool,
     ) -> Result<Value, AppError> {
-        let apply_common_config = resolve_live_apply_common_config(
+        let apply_common_config = Self::resolve_live_apply_common_config(
             app_type,
             provider,
             common_config_snippet,
@@ -4816,208 +1982,4 @@ pub struct ProviderSortUpdate {
     pub id: String,
     #[serde(rename = "sortIndex")]
     pub sort_index: usize,
-}
-
-#[cfg(test)]
-mod codex_openai_auth_tests {
-    use super::*;
-    use serial_test::serial;
-    use std::ffi::OsString;
-    use std::path::Path;
-    use tempfile::TempDir;
-
-    struct EnvGuard {
-        old_home: Option<OsString>,
-        old_userprofile: Option<OsString>,
-    }
-
-    impl EnvGuard {
-        fn set_home(home: &Path) -> Self {
-            let old_home = std::env::var_os("HOME");
-            let old_userprofile = std::env::var_os("USERPROFILE");
-            std::env::set_var("HOME", home);
-            std::env::set_var("USERPROFILE", home);
-            Self {
-                old_home,
-                old_userprofile,
-            }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.old_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match &self.old_userprofile {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-        }
-    }
-
-    #[test]
-    #[serial]
-    fn switch_codex_provider_writes_stored_config_directly() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
-            .expect("create ~/.codex (initialized)");
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Codex);
-        {
-            let manager = config
-                .get_manager_mut(&AppType::Codex)
-                .expect("codex manager");
-            manager.providers.insert(
-                "p1".to_string(),
-                Provider::with_id(
-                    "p1".to_string(),
-                    "OpenAI".to_string(),
-                    json!({
-                        "auth": { "OPENAI_API_KEY": "sk-test" },
-                        "config": "model_provider = \"openai\"\nmodel = \"gpt-4o\"\n\n[model_providers.openai]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"chat\"\nrequires_openai_auth = true\n"
-                    }),
-                    None,
-                ),
-            );
-        }
-
-        let state = state_from_config(config);
-        ProviderService::switch(&state, AppType::Codex, "p1").expect("switch should succeed");
-
-        let config_text =
-            std::fs::read_to_string(get_codex_config_path()).expect("read codex config.toml");
-        assert!(
-            config_text.contains("requires_openai_auth = true"),
-            "config.toml should contain requires_openai_auth from stored config"
-        );
-        assert!(
-            config_text.contains("base_url = \"https://api.openai.com/v1\""),
-            "config.toml should contain base_url from stored config"
-        );
-        assert!(
-            config_text.contains("model = \"gpt-4o\""),
-            "config.toml should contain model from stored config"
-        );
-    }
-
-    #[test]
-    #[serial]
-    fn switch_codex_provider_migrates_legacy_flat_config() {
-        let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
-        std::fs::create_dir_all(crate::codex_config::get_codex_config_dir())
-            .expect("create ~/.codex (initialized)");
-
-        // Start with legacy flat format
-        let legacy_config = "base_url = \"https://jp.duckcoding.com/v1\"\nmodel = \"gpt-5.1-codex\"\nwire_api = \"responses\"\nrequires_openai_auth = true";
-        let mut provider = Provider::with_id(
-            "custom1".to_string(),
-            "DuckCoding".to_string(),
-            json!({
-                "auth": { "OPENAI_API_KEY": "sk-duck" },
-                "config": legacy_config
-            }),
-            None,
-        );
-
-        // Simulate startup migration (normally done in AppState::try_new)
-        if let Some(migrated) = super::migrate_legacy_codex_config(legacy_config, &provider) {
-            provider
-                .settings_config
-                .as_object_mut()
-                .unwrap()
-                .insert("config".to_string(), Value::String(migrated));
-        }
-
-        let mut config = MultiAppConfig::default();
-        config.ensure_app(&AppType::Codex);
-        config
-            .get_manager_mut(&AppType::Codex)
-            .unwrap()
-            .providers
-            .insert("custom1".to_string(), provider);
-
-        let state = state_from_config(config);
-        ProviderService::switch(&state, AppType::Codex, "custom1").expect("switch should succeed");
-
-        let config_text =
-            std::fs::read_to_string(get_codex_config_path()).expect("read codex config.toml");
-        assert!(
-            config_text.contains("model_provider = "),
-            "config.toml should have model_provider after migration: {config_text}"
-        );
-        assert!(
-            config_text.contains("[model_providers."),
-            "config.toml should have [model_providers.xxx] section after migration: {config_text}"
-        );
-        assert!(
-            config_text.contains("base_url = \"https://jp.duckcoding.com/v1\""),
-            "config.toml should preserve base_url after migration: {config_text}"
-        );
-        assert!(
-            config_text.contains("model = \"gpt-5.1-codex\""),
-            "config.toml should preserve model after migration: {config_text}"
-        );
-        assert!(
-            config_text.contains("wire_api = \"responses\""),
-            "config.toml should preserve wire_api after migration: {config_text}"
-        );
-    }
-
-    #[test]
-    fn migrate_legacy_codex_config_noop_for_new_format() {
-        let new_format = "model_provider = \"openai\"\nmodel = \"gpt-4o\"\n\n[model_providers.openai]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"chat\"\n";
-        let provider = Provider::with_id("p1".to_string(), "OpenAI".to_string(), json!({}), None);
-        let result = super::migrate_legacy_codex_config(new_format, &provider);
-        assert!(result.is_none(), "new format should not trigger migration");
-    }
-
-    #[test]
-    fn migrate_legacy_codex_config_converts_flat_format() {
-        let legacy = "base_url = \"https://custom.com/v1\"\nmodel = \"gpt-5.1-codex\"\nwire_api = \"responses\"\nrequires_openai_auth = true";
-        let provider = Provider::with_id(
-            "my_provider".to_string(),
-            "My Provider".to_string(),
-            json!({}),
-            None,
-        );
-        let result = super::migrate_legacy_codex_config(legacy, &provider)
-            .expect("legacy format should trigger migration");
-        assert!(
-            result.contains("model_provider = \"my_provider\""),
-            "should set model_provider from provider id: {result}"
-        );
-        assert!(
-            result.contains("[model_providers.my_provider]"),
-            "should create model_providers section: {result}"
-        );
-        assert!(
-            result.contains("base_url = \"https://custom.com/v1\""),
-            "should preserve base_url: {result}"
-        );
-        assert!(
-            result.contains("wire_api = \"responses\""),
-            "should preserve wire_api: {result}"
-        );
-    }
-
-    #[test]
-    fn migrate_legacy_codex_config_preserves_extra_keys() {
-        let legacy = "base_url = \"https://custom.com/v1\"\nmodel = \"gpt-5.1-codex\"\nwire_api = \"responses\"\nrequires_openai_auth = true\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true";
-        let provider = Provider::with_id("test".to_string(), "Test".to_string(), json!({}), None);
-        let result = super::migrate_legacy_codex_config(legacy, &provider)
-            .expect("legacy format should trigger migration");
-        assert!(
-            result.contains("model_reasoning_effort = \"high\""),
-            "should preserve model_reasoning_effort: {result}"
-        );
-        assert!(
-            result.contains("disable_response_storage = true"),
-            "should preserve disable_response_storage: {result}"
-        );
-    }
 }

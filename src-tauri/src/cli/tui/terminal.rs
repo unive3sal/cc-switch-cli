@@ -22,7 +22,7 @@ type PanicHook = Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'sta
 type InMemoryTerminal = Terminal<TestBackend>;
 
 enum TerminalHandle {
-    Live(LiveTerminal),
+    Stdout(LiveTerminal),
     #[cfg(test)]
     Test(InMemoryTerminal),
 }
@@ -104,20 +104,6 @@ fn terminal_error(e: impl ToString) -> AppError {
 }
 
 impl TuiTerminal {
-    #[cfg(test)]
-    fn live_terminal_mut(&mut self) -> Option<&mut LiveTerminal> {
-        match &mut self.terminal {
-            TerminalHandle::Live(terminal) => Some(terminal),
-            TerminalHandle::Test(_) => None,
-        }
-    }
-
-    #[cfg(not(test))]
-    fn live_terminal_mut(&mut self) -> Option<&mut LiveTerminal> {
-        let TerminalHandle::Live(terminal) = &mut self.terminal;
-        Some(terminal)
-    }
-
     pub fn new() -> Result<Self, AppError> {
         let mut stdout = io::stdout();
         enable_raw_mode().map_err(terminal_error)?;
@@ -141,7 +127,7 @@ impl TuiTerminal {
         };
 
         Ok(Self {
-            terminal: TerminalHandle::Live(terminal),
+            terminal: TerminalHandle::Stdout(terminal),
             active: true,
         })
     }
@@ -151,8 +137,8 @@ impl TuiTerminal {
         const TEST_TERMINAL_WIDTH: u16 = 120;
         const TEST_TERMINAL_HEIGHT: u16 = 40;
 
-        let terminal = Terminal::new(TestBackend::new(TEST_TERMINAL_WIDTH, TEST_TERMINAL_HEIGHT))
-            .map_err(terminal_error)?;
+        let backend = TestBackend::new(TEST_TERMINAL_WIDTH, TEST_TERMINAL_HEIGHT);
+        let terminal = Terminal::new(backend).expect("test terminal backend should be infallible");
 
         Ok(Self {
             terminal: TerminalHandle::Test(terminal),
@@ -165,17 +151,19 @@ impl TuiTerminal {
         F: FnOnce(&mut ratatui::Frame<'_>),
     {
         match &mut self.terminal {
-            TerminalHandle::Live(terminal) => terminal.draw(f).map(|_| ()).map_err(terminal_error),
+            TerminalHandle::Stdout(terminal) => {
+                terminal.draw(f).map(|_| ()).map_err(terminal_error)
+            }
             #[cfg(test)]
-            TerminalHandle::Test(terminal) => terminal.draw(f).map(|_| ()).map_err(terminal_error),
+            TerminalHandle::Test(terminal) => terminal.draw(f).map(|_| ()).map_err(|e| match e {}),
         }
     }
 
     pub fn size(&self) -> Result<Size, AppError> {
         match &self.terminal {
-            TerminalHandle::Live(terminal) => terminal.size().map_err(terminal_error),
+            TerminalHandle::Stdout(terminal) => terminal.size().map_err(terminal_error),
             #[cfg(test)]
-            TerminalHandle::Test(terminal) => terminal.size().map_err(terminal_error),
+            TerminalHandle::Test(terminal) => terminal.size().map_err(|e| match e {}),
         }
     }
 
@@ -219,10 +207,11 @@ impl TuiTerminal {
             return Ok(());
         }
 
-        let Some(terminal) = self.live_terminal_mut() else {
+        #[cfg(test)]
+        if matches!(self.terminal, TerminalHandle::Test(_)) {
             self.active = false;
             return Ok(());
-        };
+        }
 
         let mut first_err: Option<AppError> = None;
 
@@ -230,15 +219,21 @@ impl TuiTerminal {
             record_err(&mut first_err, e);
         }
 
-        if let Err(e) = execute!(
-            terminal.backend_mut(),
-            cursor::Show,
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        ) {
-            record_err(&mut first_err, e);
+        match &mut self.terminal {
+            TerminalHandle::Stdout(terminal) => {
+                if let Err(e) = execute!(
+                    terminal.backend_mut(),
+                    cursor::Show,
+                    LeaveAlternateScreen,
+                    DisableMouseCapture
+                ) {
+                    record_err(&mut first_err, e);
+                }
+                let _ = terminal.show_cursor();
+            }
+            #[cfg(test)]
+            TerminalHandle::Test(_) => unreachable!("test terminal should return early"),
         }
-        let _ = terminal.show_cursor();
 
         if let Some(err) = first_err {
             Err(err)
@@ -253,9 +248,14 @@ impl TuiTerminal {
             return Ok(());
         }
 
-        let Some(terminal) = self.live_terminal_mut() else {
+        #[cfg(test)]
+        if let TerminalHandle::Test(terminal) = &mut self.terminal {
+            terminal
+                .clear()
+                .expect("test terminal backend should clear infallibly");
+            self.active = true;
             return Ok(());
-        };
+        }
 
         let mut first_err: Option<AppError> = None;
 
@@ -263,17 +263,23 @@ impl TuiTerminal {
             record_err(&mut first_err, e);
         }
 
-        if let Err(e) = execute!(
-            terminal.backend_mut(),
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            cursor::Hide
-        ) {
-            record_err(&mut first_err, e);
-        }
+        match &mut self.terminal {
+            TerminalHandle::Stdout(terminal) => {
+                if let Err(e) = execute!(
+                    terminal.backend_mut(),
+                    EnterAlternateScreen,
+                    EnableMouseCapture,
+                    cursor::Hide
+                ) {
+                    record_err(&mut first_err, e);
+                }
 
-        if let Err(e) = terminal.clear() {
-            record_err(&mut first_err, e);
+                if let Err(e) = terminal.clear() {
+                    record_err(&mut first_err, e);
+                }
+            }
+            #[cfg(test)]
+            TerminalHandle::Test(_) => unreachable!("test terminal should return early"),
         }
 
         if let Some(err) = first_err {
@@ -323,19 +329,6 @@ mod tests {
     }
 
     #[test]
-    fn test_terminal_restore_and_reactivate_are_safe_noops() {
-        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
-
-        terminal
-            .restore_best_effort()
-            .expect("restore test terminal");
-        terminal
-            .activate_best_effort()
-            .expect("reactivate test terminal");
-        terminal.draw(|_| {}).expect("draw after lifecycle noops");
-    }
-
-    #[test]
     fn with_terminal_restored_keeps_test_terminal_usable() {
         let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
 
@@ -347,5 +340,17 @@ mod tests {
         terminal
             .draw(|_| {})
             .expect("draw after with_terminal_restored");
+    }
+
+    #[test]
+    fn test_terminal_can_activate_and_restore_without_real_tty() {
+        let mut terminal = TuiTerminal::new_for_test().expect("create test terminal");
+
+        terminal
+            .activate_best_effort()
+            .expect("test terminal should activate without a real tty");
+        terminal
+            .restore_best_effort()
+            .expect("test terminal should restore without a real tty");
     }
 }

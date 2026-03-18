@@ -1048,6 +1048,45 @@ mod tests {
     }
 
     #[test]
+    fn provider_switch_first_use_overlay_enter_requests_import() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::ProviderSwitchFirstUseConfirm {
+            provider_id: "p1".to_string(),
+            title: texts::tui_provider_switch_first_use_title().to_string(),
+            message: texts::tui_provider_switch_first_use_message("~/.claude/settings.json"),
+            selected: 0,
+        };
+
+        let action = app.on_key(key(KeyCode::Enter), &data());
+
+        assert!(matches!(action, Action::ProviderImportLiveConfig));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn provider_switch_first_use_overlay_right_then_enter_confirms_switch() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::ProviderSwitchFirstUseConfirm {
+            provider_id: "p1".to_string(),
+            title: texts::tui_provider_switch_first_use_title().to_string(),
+            message: texts::tui_provider_switch_first_use_message("~/.claude/settings.json"),
+            selected: 0,
+        };
+
+        let move_action = app.on_key(key(KeyCode::Right), &data());
+        assert!(matches!(move_action, Action::None));
+
+        let action = app.on_key(key(KeyCode::Enter), &data());
+
+        assert!(matches!(action, Action::ProviderSwitchForce { id } if id == "p1"));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
     fn openclaw_provider_detail_s_key_blocks_removing_fallback_only_default_provider() {
         let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::ProviderDetail {
@@ -2951,6 +2990,89 @@ mod tests {
     }
 
     #[test]
+    fn provider_add_form_ctrl_s_generates_hidden_id_from_name_before_submit() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+
+        if let Some(super::super::form::FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = super::super::form::FormFocus::Fields;
+            form.name.set("Provider One");
+            form.id.set("");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        let submit = app.on_key(ctrl(KeyCode::Char('s')), &data);
+        let Action::EditorSubmit { submit, content } = submit else {
+            panic!("Ctrl+S should submit when name is present");
+        };
+
+        assert!(matches!(submit, EditorSubmit::ProviderAdd));
+        assert!(
+            content.contains("\"id\": \"provider-one\""),
+            "save should auto-generate an id from name before submit"
+        );
+        assert!(content.contains("\"name\": \"Provider One\""));
+    }
+
+    #[test]
+    fn provider_add_form_missing_fields_toast_mentions_name_only() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+
+        let submit = app.on_key(ctrl(KeyCode::Char('s')), &data);
+        assert!(matches!(submit, Action::None));
+        let Some(Toast {
+            message,
+            kind: ToastKind::Warning,
+            ..
+        }) = app.toast.as_ref()
+        else {
+            panic!("expected warning toast for missing add-form fields");
+        };
+        assert!(message.contains("name"));
+        assert!(message.contains("generated automatically"));
+        assert!(!message.contains("id and name"));
+        assert!(!message.contains("in JSON"));
+    }
+
+    #[test]
+    fn provider_add_form_ctrl_s_rejects_name_that_cannot_generate_id() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+
+        if let Some(super::super::form::FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = super::super::form::FormFocus::Fields;
+            form.name.set("!!!");
+            form.id.set("");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        let submit = app.on_key(ctrl(KeyCode::Char('s')), &data);
+        assert!(matches!(submit, Action::None));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(Toast {
+                kind: ToastKind::Warning,
+                ..
+            })
+        ));
+    }
+
+    #[test]
     fn provider_add_form_tab_cycles_focus() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
@@ -3159,7 +3281,7 @@ mod tests {
     }
 
     #[test]
-    fn provider_form_ctrl_s_merges_common_snippet_into_submitted_json() {
+    fn provider_form_ctrl_s_does_not_merge_common_snippet_for_claude() {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Providers;
         app.focus = Focus::Content;
@@ -3185,12 +3307,16 @@ mod tests {
             unreachable!("expected submit action");
         };
         assert!(
-            content.contains("\"alwaysThinkingEnabled\""),
-            "submitted provider JSON should include merged common snippet keys when enabled"
+            !content.contains("\"alwaysThinkingEnabled\""),
+            "submitted provider JSON should keep common snippet keys out of the raw payload"
         );
         assert!(
-            content.contains("\"statusLine\""),
-            "submitted provider JSON should include nested common snippet keys when enabled"
+            !content.contains("\"statusLine\""),
+            "submitted provider JSON should keep nested common snippet keys out of the raw payload"
+        );
+        assert!(
+            content.contains("\"ANTHROPIC_BASE_URL\""),
+            "submitted provider JSON should still include provider-specific settings"
         );
     }
 
@@ -3527,6 +3653,35 @@ mod tests {
         let action = app.on_key(key(KeyCode::Enter), &data);
         assert!(matches!(action, Action::None));
         assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn provider_claude_api_format_proxy_notice_reveals_pending_shared_config_tip() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.pending_overlay = Some(Overlay::Confirm(ConfirmOverlay {
+            title: texts::tui_provider_switch_shared_config_tip_title().to_string(),
+            message: texts::tui_provider_switch_shared_config_tip_message(),
+            action: ConfirmAction::ProviderSwitchSharedConfigNotice,
+        }));
+        app.overlay = Overlay::Confirm(ConfirmOverlay {
+            title: texts::tui_claude_api_format_requires_proxy_title().to_string(),
+            message: texts::tui_claude_api_format_requires_proxy_message("openai_chat"),
+            action: ConfirmAction::ProviderApiFormatProxyNotice,
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &data());
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::ProviderSwitchSharedConfigNotice,
+                ..
+            })
+        ));
+        assert!(app.pending_overlay.is_none());
     }
 
     #[test]

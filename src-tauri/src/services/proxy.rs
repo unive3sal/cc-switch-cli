@@ -1,3 +1,5 @@
+mod codex_toml;
+
 use std::{
     collections::HashMap,
     future::Future,
@@ -449,6 +451,31 @@ impl ProxyService {
         self.db.update_proxy_config(config.clone()).await
     }
 
+    pub async fn update_circuit_breaker_configs(
+        &self,
+        config: crate::proxy::circuit_breaker::CircuitBreakerConfig,
+    ) -> Result<(), String> {
+        if let Some(server) = self.runtime.server.read().await.as_ref() {
+            server.update_circuit_breaker_configs(config).await;
+        }
+
+        Ok(())
+    }
+
+    pub async fn reset_provider_circuit_breaker(
+        &self,
+        provider_id: &str,
+        app_type: &str,
+    ) -> Result<(), String> {
+        if let Some(server) = self.runtime.server.read().await.as_ref() {
+            server
+                .reset_provider_circuit_breaker(provider_id, app_type)
+                .await;
+        }
+
+        Ok(())
+    }
+
     pub async fn get_global_config(&self) -> Result<GlobalProxyConfig, AppError> {
         self.db.get_global_proxy_config().await
     }
@@ -537,7 +564,7 @@ impl ProxyService {
                             .and_then(Value::as_str)
                             .is_some_and(|value| value == PROXY_TOKEN_PLACEHOLDER)
                     });
-                    Some(Self::is_loopback_proxy_url(base_url) && has_placeholder)
+                    Some(codex_toml::is_loopback_proxy_url(base_url) && has_placeholder)
                 })
                 .unwrap_or(false),
             AppType::Codex => self
@@ -552,7 +579,7 @@ impl ProxyService {
                     let points_to_proxy = live
                         .get("config")
                         .and_then(Value::as_str)
-                        .is_some_and(Self::contains_loopback_proxy_url);
+                        .is_some_and(codex_toml::contains_loopback_proxy_url);
                     has_placeholder && points_to_proxy
                 })
                 .unwrap_or(false),
@@ -566,7 +593,7 @@ impl ProxyService {
                         .get("GEMINI_API_KEY")
                         .and_then(Value::as_str)
                         .is_some_and(|value| value == PROXY_TOKEN_PLACEHOLDER);
-                    Some(Self::is_loopback_proxy_url(base_url) && has_placeholder)
+                    Some(codex_toml::is_loopback_proxy_url(base_url) && has_placeholder)
                 })
                 .unwrap_or(false),
             _ => false,
@@ -780,9 +807,49 @@ impl ProxyService {
             })
             .and_then(|provider| {
                 provider
-                    .map(|provider| self.build_live_snapshot_from_provider(app_type, &provider))
+                    .map(|provider| {
+                        self.build_current_provider_restore_snapshot(app_type, &provider)
+                    })
                     .transpose()
             })
+    }
+
+    fn build_current_provider_restore_snapshot(
+        &self,
+        app_type: &AppType,
+        provider: &Provider,
+    ) -> Result<Value, String> {
+        let common_config_snippet =
+            self.db
+                .get_config_snippet(app_type.as_str())
+                .map_err(|error| {
+                    format!(
+                        "load common config snippet for {} failed: {error}",
+                        app_type.as_str()
+                    )
+                })?;
+        let apply_common_config = if matches!(app_type, AppType::Codex) {
+            false
+        } else {
+            provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.apply_common_config)
+                .unwrap_or(true)
+        };
+
+        crate::services::provider::ProviderService::build_live_backup_snapshot(
+            app_type,
+            provider,
+            common_config_snippet.as_deref(),
+            apply_common_config,
+        )
+        .map_err(|error| {
+            format!(
+                "build {} current-provider restore snapshot failed: {error}",
+                app_type.as_str()
+            )
+        })
     }
 
     async fn read_or_current_provider_live(&self, app_type: &AppType) -> Result<Value, String> {
@@ -905,7 +972,7 @@ impl ProxyService {
                     .to_string();
                 root.insert(
                     "config".to_string(),
-                    json!(Self::update_toml_base_url(
+                    json!(codex_toml::update_toml_base_url(
                         &config_text,
                         proxy_codex_base_url
                     )),
@@ -977,7 +1044,7 @@ impl ProxyService {
                     if env
                         .get("ANTHROPIC_BASE_URL")
                         .and_then(Value::as_str)
-                        .is_some_and(Self::is_loopback_proxy_url)
+                        .is_some_and(codex_toml::is_loopback_proxy_url)
                     {
                         env.remove("ANTHROPIC_BASE_URL");
                     }
@@ -1010,7 +1077,8 @@ impl ProxyService {
                 }
 
                 if let Some(config_text) = live.get("config").and_then(Value::as_str) {
-                    live["config"] = json!(Self::remove_loopback_base_url_from_toml(config_text));
+                    live["config"] =
+                        json!(codex_toml::remove_loopback_base_url_from_toml(config_text));
                 }
             }
             AppType::Gemini => {
@@ -1018,7 +1086,7 @@ impl ProxyService {
                     if env
                         .get("GOOGLE_GEMINI_BASE_URL")
                         .and_then(Value::as_str)
-                        .is_some_and(Self::is_loopback_proxy_url)
+                        .is_some_and(codex_toml::is_loopback_proxy_url)
                     {
                         env.remove("GOOGLE_GEMINI_BASE_URL");
                     }
@@ -1379,86 +1447,6 @@ impl ProxyService {
         write_gemini_env_atomic(&env).map_err(|error| format!("write Gemini .env failed: {error}"))
     }
 
-    fn update_toml_base_url(toml_str: &str, new_url: &str) -> String {
-        use toml_edit::DocumentMut;
-
-        let mut doc = match toml_str.parse::<DocumentMut>() {
-            Ok(doc) => doc,
-            Err(_) => return toml_str.to_string(),
-        };
-
-        let model_provider = doc
-            .get("model_provider")
-            .and_then(|item| item.as_str())
-            .map(str::to_string);
-
-        if let Some(provider_key) = model_provider {
-            if doc.get("model_providers").is_none() {
-                doc["model_providers"] = toml_edit::table();
-            }
-
-            if let Some(model_providers) = doc["model_providers"].as_table_mut() {
-                if !model_providers.contains_key(&provider_key) {
-                    model_providers[&provider_key] = toml_edit::table();
-                }
-
-                if let Some(provider_table) = model_providers[&provider_key].as_table_mut() {
-                    provider_table["base_url"] = toml_edit::value(new_url);
-                    return doc.to_string();
-                }
-            }
-        }
-
-        doc["base_url"] = toml_edit::value(new_url);
-        doc.to_string()
-    }
-
-    fn remove_loopback_base_url_from_toml(toml_str: &str) -> String {
-        use toml_edit::DocumentMut;
-
-        let mut doc = match toml_str.parse::<DocumentMut>() {
-            Ok(doc) => doc,
-            Err(_) => return toml_str.to_string(),
-        };
-
-        let model_provider = doc
-            .get("model_provider")
-            .and_then(|item| item.as_str())
-            .map(str::to_string);
-
-        if let Some(provider_key) = model_provider {
-            if let Some(base_url) = doc
-                .get("model_providers")
-                .and_then(|item| item.as_table_like())
-                .and_then(|table| table.get(&provider_key))
-                .and_then(|item| item.as_table_like())
-                .and_then(|table| table.get("base_url"))
-                .and_then(|item| item.as_str())
-            {
-                if Self::contains_loopback_proxy_url(base_url) {
-                    if let Some(section) = doc
-                        .get_mut("model_providers")
-                        .and_then(|item| item.as_table_like_mut())
-                        .and_then(|table| table.get_mut(&provider_key))
-                        .and_then(|item| item.as_table_like_mut())
-                    {
-                        section.remove("base_url");
-                    }
-                }
-            }
-        }
-
-        if doc
-            .get("base_url")
-            .and_then(|item| item.as_str())
-            .is_some_and(Self::contains_loopback_proxy_url)
-        {
-            doc.as_table_mut().remove("base_url");
-        }
-
-        doc.to_string()
-    }
-
     fn takeover_app_from_str(app_type: &str) -> Result<AppType, String> {
         match app_type {
             "claude" => Ok(AppType::Claude),
@@ -1467,12 +1455,137 @@ impl ProxyService {
             _ => Err(format!("proxy takeover not supported for app: {app_type}")),
         }
     }
+}
 
-    fn is_loopback_proxy_url(url: &str) -> bool {
-        url.contains("127.0.0.1") || url.contains("localhost") || url.contains("[::1]")
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proxy::circuit_breaker::CircuitBreakerConfig;
+    use serial_test::serial;
+
+    #[tokio::test]
+    #[serial]
+    async fn hot_updating_running_breaker_configs_refreshes_existing_breakers() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+
+        let provider = Provider::with_id(
+            "p1".to_string(),
+            "Provider One".to_string(),
+            json!({}),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save provider");
+
+        let mut app_proxy = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("load app proxy config");
+        app_proxy.circuit_failure_threshold = 1;
+        app_proxy.circuit_timeout_seconds = 3600;
+        db.update_proxy_config_for_app(app_proxy)
+            .await
+            .expect("persist initial breaker config");
+
+        let mut runtime_config = service.get_config().await.expect("get proxy config");
+        runtime_config.listen_port = 0;
+        service
+            .start_with_runtime_config(runtime_config)
+            .await
+            .expect("start proxy");
+
+        let router = {
+            let server_guard = service.runtime.server.read().await;
+            server_guard
+                .as_ref()
+                .expect("running server")
+                .provider_router()
+        };
+
+        router
+            .record_result("p1", "claude", false, false, Some("fail".to_string()))
+            .await
+            .expect("open breaker");
+        assert!(!router.allow_provider_request("p1", "claude").await.allowed);
+
+        let updated = CircuitBreakerConfig {
+            failure_threshold: 1,
+            success_threshold: 2,
+            timeout_seconds: 0,
+            error_rate_threshold: 1.0,
+            min_requests: u32::MAX,
+        };
+        db.update_circuit_breaker_config(&updated)
+            .await
+            .expect("persist updated breaker config");
+        service
+            .update_circuit_breaker_configs(updated)
+            .await
+            .expect("hot update running breaker config");
+
+        let permit = router.allow_provider_request("p1", "claude").await;
+        assert!(permit.allowed);
+        assert!(permit.used_half_open_permit);
+
+        service.stop().await.expect("stop proxy");
     }
 
-    fn contains_loopback_proxy_url(text: &str) -> bool {
-        text.contains("127.0.0.1") || text.contains("localhost") || text.contains("[::1]")
+    #[tokio::test]
+    #[serial]
+    async fn resetting_running_provider_breaker_clears_existing_breaker_state() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+
+        let provider = Provider::with_id(
+            "p1".to_string(),
+            "Provider One".to_string(),
+            json!({}),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save provider");
+
+        let mut app_proxy = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("load app proxy config");
+        app_proxy.circuit_failure_threshold = 1;
+        app_proxy.circuit_timeout_seconds = 3600;
+        db.update_proxy_config_for_app(app_proxy)
+            .await
+            .expect("persist breaker config");
+
+        let mut runtime_config = service.get_config().await.expect("get proxy config");
+        runtime_config.listen_port = 0;
+        service
+            .start_with_runtime_config(runtime_config)
+            .await
+            .expect("start proxy");
+
+        let router = {
+            let server_guard = service.runtime.server.read().await;
+            server_guard
+                .as_ref()
+                .expect("running server")
+                .provider_router()
+        };
+
+        router
+            .record_result("p1", "claude", false, false, Some("fail".to_string()))
+            .await
+            .expect("open breaker");
+        assert!(!router.allow_provider_request("p1", "claude").await.allowed);
+
+        service
+            .reset_provider_circuit_breaker("p1", "claude")
+            .await
+            .expect("reset running breaker");
+
+        let permit = router.allow_provider_request("p1", "claude").await;
+        assert!(permit.allowed);
+        assert!(!permit.used_half_open_permit);
+
+        service.stop().await.expect("stop proxy");
     }
 }

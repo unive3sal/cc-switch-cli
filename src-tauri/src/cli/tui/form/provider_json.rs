@@ -432,7 +432,7 @@ impl ProviderAddFormState {
         };
 
         match self.app_type {
-            AppType::Claude | AppType::Gemini | AppType::OpenCode | AppType::OpenClaw => {
+            AppType::Claude | AppType::Gemini => {
                 let mut common: Value = serde_json::from_str(snippet).map_err(|e| {
                     crate::cli::i18n::texts::common_config_snippet_invalid_json(&e.to_string())
                 })?;
@@ -443,11 +443,9 @@ impl ProviderAddFormState {
                 }
 
                 merge_json_values(&mut common, settings_value);
-                if matches!(self.app_type, AppType::OpenClaw) {
-                    normalize_openclaw_settings_aliases(&mut common);
-                }
                 *settings_value = common;
             }
+            AppType::OpenCode | AppType::OpenClaw => {}
             AppType::Codex => {
                 if !settings_value.is_object() {
                     *settings_value = json!({});
@@ -476,26 +474,6 @@ fn openclaw_model_index(models: &[Value], model_id: &str) -> Option<usize> {
             .map(|id| id == model_id)
             .unwrap_or(false)
     })
-}
-
-fn normalize_openclaw_settings_aliases(settings_value: &mut Value) {
-    let Some(settings_obj) = settings_value.as_object_mut() else {
-        return;
-    };
-
-    if !settings_obj.contains_key("apiKey") {
-        if let Some(api_key) = settings_obj.get("api_key").cloned() {
-            settings_obj.insert("apiKey".to_string(), api_key);
-        }
-    }
-    settings_obj.remove("api_key");
-
-    if !settings_obj.contains_key("baseUrl") {
-        if let Some(base_url) = settings_obj.get("base_url").cloned() {
-            settings_obj.insert("baseUrl".to_string(), base_url);
-        }
-    }
-    settings_obj.remove("base_url");
 }
 
 pub(crate) fn merge_json_values(base: &mut Value, overlay: &Value) {
@@ -527,7 +505,7 @@ pub(crate) fn strip_common_config_from_settings(
     }
 
     match app_type {
-        AppType::Claude | AppType::Gemini | AppType::OpenCode | AppType::OpenClaw => {
+        AppType::Claude | AppType::Gemini => {
             let common: Value = serde_json::from_str(snippet).map_err(|e| {
                 crate::cli::i18n::texts::common_config_snippet_invalid_json(&e.to_string())
             })?;
@@ -537,6 +515,7 @@ pub(crate) fn strip_common_config_from_settings(
 
             strip_common_json_values(settings_value, &common);
         }
+        AppType::OpenCode | AppType::OpenClaw => {}
         AppType::Codex => {
             if !settings_value.is_object() {
                 return Ok(());

@@ -4006,17 +4006,17 @@ pub mod texts {
 
     pub fn tui_toast_provider_add_missing_fields() -> &'static str {
         if is_chinese() {
-            "请在 JSON 中填写 id 和 name。"
+            "请填写 name，id 会自动生成。"
         } else {
-            "Please fill in id and name in JSON."
+            "Please fill in name. id will be generated automatically."
         }
     }
 
     pub fn tui_toast_provider_missing_name() -> &'static str {
         if is_chinese() {
-            "请在 JSON 中填写 name。"
+            "请填写 name，id 会自动生成。"
         } else {
-            "Please fill in name in JSON."
+            "Please fill in name. id will be generated automatically."
         }
     }
 
@@ -6957,6 +6957,14 @@ pub mod texts {
         }
     }
 
+    pub fn common_config_snippet_no_current_provider_after_clear() -> &'static str {
+        if is_chinese() {
+            "当前未选择供应商，已清除通用配置片段。"
+        } else {
+            "No current provider selected; common config snippet cleared."
+        }
+    }
+
     pub fn common_config_snippet_applied() -> &'static str {
         if is_chinese() {
             "✓ 已应用到 live 配置（请重启对应客户端）"
@@ -6970,6 +6978,14 @@ pub mod texts {
             "提示：切换一次供应商即可重新写入 live 配置。"
         } else {
             "Tip: switch provider once to re-write the live config."
+        }
+    }
+
+    pub fn common_config_snippet_apply_not_needed() -> &'static str {
+        if is_chinese() {
+            "当前配置已是最新，无需重新应用。"
+        } else {
+            "The current live config is already up to date; nothing to apply."
         }
     }
 
@@ -7425,6 +7441,122 @@ pub mod texts {
             format!("后台更新失败: {err}")
         } else {
             format!("Background update failed: {err}")
+        }
+    }
+
+    pub fn tui_provider_imported_live_config_name() -> &'static str {
+        if is_chinese() {
+            "导入的 Live 配置"
+        } else {
+            "Imported Live Config"
+        }
+    }
+
+    pub fn tui_codex_imported_live_config_name() -> &'static str {
+        if is_chinese() {
+            "导入的 Codex Live 配置"
+        } else {
+            "Imported Codex Live Config"
+        }
+    }
+
+    pub fn tui_toast_provider_live_config_imported() -> &'static str {
+        if is_chinese() {
+            "已将当前 live 配置导入为供应商"
+        } else {
+            "Imported the current live config as a provider"
+        }
+    }
+
+    pub fn tui_toast_codex_live_config_imported() -> &'static str {
+        if is_chinese() {
+            "已将当前 Codex live 配置导入为供应商"
+        } else {
+            "Imported the current Codex live config as a provider"
+        }
+    }
+
+    pub fn tui_provider_switch_first_use_title() -> &'static str {
+        if is_chinese() {
+            "检测到现有 live 配置"
+        } else {
+            "Existing live config detected"
+        }
+    }
+
+    pub fn tui_provider_switch_first_use_message(path: &str) -> String {
+        if is_chinese() {
+            format!("首次切换前，检测到 {path} 已存在配置。你可以先导入当前 live 配置，或继续切换并覆盖它。")
+        } else {
+            format!("Before the first switch, an existing config was found at {path}. You can import the current live config first, or continue and overwrite it.")
+        }
+    }
+
+    pub fn tui_codex_provider_switch_first_use_title() -> &'static str {
+        if is_chinese() {
+            "检测到现有 Codex live 配置"
+        } else {
+            "Existing Codex live config detected"
+        }
+    }
+
+    pub fn tui_codex_provider_switch_first_use_message(paths: &str) -> String {
+        if is_chinese() {
+            format!("首次切换前，检测到 {paths} 已存在配置。你可以先导入当前 live 配置，或继续切换并覆盖它。")
+        } else {
+            format!("Before the first switch, existing config was found in {paths}. You can import the current live config first, or continue and overwrite it.")
+        }
+    }
+
+    pub fn tui_provider_switch_first_use_import_button() -> &'static str {
+        if is_chinese() {
+            "导入当前配置"
+        } else {
+            "Import Current Config"
+        }
+    }
+
+    pub fn tui_provider_switch_first_use_continue_button() -> &'static str {
+        if is_chinese() {
+            "继续切换"
+        } else {
+            "Continue Switching"
+        }
+    }
+
+    pub fn tui_provider_switch_first_use_cancel_button() -> &'static str {
+        if is_chinese() {
+            "取消"
+        } else {
+            "Cancel"
+        }
+    }
+
+    pub fn tui_provider_switch_shared_config_tip_title() -> &'static str {
+        if is_chinese() {
+            "已切换供应商"
+        } else {
+            "Provider Switched"
+        }
+    }
+
+    pub fn tui_provider_switch_shared_config_tip_message() -> String {
+        if is_chinese() {
+            "当前 live 配置还会叠加通用配置片段；如果结果和预期不同，请检查 Common Snippet。"
+                .to_string()
+        } else {
+            "The live config still applies the shared common snippet; if the result looks different than expected, check Common Snippet."
+                .to_string()
+        }
+    }
+
+    pub fn tui_codex_provider_switch_shared_config_tip_message() -> String {
+        if is_chinese() {
+            "当前 Codex live 配置还会叠加通用配置片段；如果结果和预期不同，请检查 Common Snippet。"
+                .to_string()
+        } else {
+            "The Codex live config still applies the shared common snippet; if the result looks different than expected, check Common Snippet."
+                .to_string()
         }
     }
 }
