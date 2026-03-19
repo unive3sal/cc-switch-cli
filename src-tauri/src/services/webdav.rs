@@ -5,8 +5,10 @@
 
 use std::time::Duration;
 
+use futures::StreamExt;
 use reqwest::{Client, Method, StatusCode};
 use url::Url;
+use uuid::Uuid;
 
 use crate::error::AppError;
 
@@ -57,7 +59,85 @@ pub fn parse_base_url(raw: &str) -> Result<Url, AppError> {
             "WebDAV base_url 仅支持 http/https".to_string(),
         ));
     }
+    validate_provider_base_url(&url)?;
     Ok(url)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebDavService {
+    Jianguoyun,
+    Nutstore,
+}
+
+impl WebDavService {
+    fn provider_name(self) -> &'static str {
+        match self {
+            Self::Jianguoyun => "坚果云",
+            Self::Nutstore => "Nutstore",
+        }
+    }
+
+    fn dav_example(self) -> &'static str {
+        match self {
+            Self::Jianguoyun => "https://dav.jianguoyun.com/dav/...",
+            Self::Nutstore => "https://dav.nutstore.net/dav/...",
+        }
+    }
+
+    fn auth_hint(self) -> String {
+        format!(
+            "。{} 通常需要「第三方应用密码」，并且 base_url 应指向 /dav/ 下的目录。",
+            self.provider_name()
+        )
+    }
+
+    fn writable_dir_hint(self) -> String {
+        format!(
+            "。{} 常见原因是 base_url 不在 /dav/ 可写目录下；请改为 {}",
+            self.provider_name(),
+            self.dav_example()
+        )
+    }
+
+    fn followup_hint(self) -> String {
+        format!(
+            "。{} 请优先使用「第三方应用密码」，并确认 base_url 指向 /dav/ 下的可写目录。",
+            self.provider_name()
+        )
+    }
+}
+
+fn detect_webdav_service(url: &Url) -> Option<WebDavService> {
+    match url.host_str()? {
+        host if host.eq_ignore_ascii_case("dav.jianguoyun.com") => Some(WebDavService::Jianguoyun),
+        host if host.eq_ignore_ascii_case("dav.nutstore.net") => Some(WebDavService::Nutstore),
+        _ => None,
+    }
+}
+
+fn validate_provider_base_url(url: &Url) -> Result<(), AppError> {
+    let Some(service) = detect_webdav_service(url) else {
+        return Ok(());
+    };
+    let points_under_dav = url
+        .path_segments()
+        .and_then(|mut segments| segments.next())
+        .is_some_and(|segment| segment == "dav");
+    if points_under_dav {
+        return Ok(());
+    }
+
+    Err(AppError::InvalidInput(format!(
+        "{} WebDAV base_url 必须指向 /dav 下的目录，例如 {}",
+        service.provider_name(),
+        service.dav_example()
+    )))
+}
+
+fn detect_service_from_base_url(base_url: &str) -> Option<WebDavService> {
+    Url::parse(base_url)
+        .ok()
+        .and_then(|url| detect_webdav_service(&url))
 }
 
 pub fn build_remote_url(base_url: &str, segments: &[String]) -> Result<String, AppError> {
@@ -82,11 +162,10 @@ pub fn path_segments(raw: &str) -> impl Iterator<Item = &str> {
 }
 
 pub fn is_jianguoyun(base_url: &str) -> bool {
-    Url::parse(base_url)
-        .ok()
-        .and_then(|url| url.host_str().map(|host| host.to_lowercase()))
-        .map(|host| host.contains("jianguoyun.com") || host.contains("nutstore"))
-        .unwrap_or(false)
+    matches!(
+        detect_service_from_base_url(base_url),
+        Some(WebDavService::Jianguoyun)
+    )
 }
 
 fn redact_url(url: &str) -> String {
@@ -131,39 +210,40 @@ pub fn webdav_status_error(
 ) -> AppError {
     let display_url = redact_url(url);
     let mut message = format!("WebDAV {operation} 失败: {status} ({display_url})");
-    let jgy = is_jianguoyun(base_url);
+    let service = detect_service_from_base_url(base_url);
 
     if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
-        if jgy {
-            message.push_str(
-                "。坚果云通常需要「第三方应用密码」，并且 base_url 应指向 /dav/ 下的目录。",
-            );
+        if let Some(service) = service {
+            message.push_str(&service.auth_hint());
         } else {
             message.push_str("。请检查 WebDAV 用户名、密码，以及该目录的读写权限。");
         }
-    } else if jgy && (status == StatusCode::NOT_FOUND || status.is_redirection()) {
-        message.push_str(
-            "。坚果云常见原因是 base_url 不在 /dav/ 可写目录下；请改为 https://dav.jianguoyun.com/dav/....",
-        );
-    } else if operation == "MKCOL" && status == StatusCode::CONFLICT {
-        if jgy {
-            message
-                .push_str("。坚果云对分层自动建目录较敏感，请先在服务端手动创建上级目录后再重试。");
-        } else {
-            message.push_str("。请确认上级目录存在，或将 remote_root/profile 调整到可写路径。");
+    } else if let Some(service) = service {
+        if status == StatusCode::NOT_FOUND || status.is_redirection() {
+            message.push_str(&service.writable_dir_hint());
+        } else if operation == "MKCOL" && status == StatusCode::CONFLICT {
+            if service == WebDavService::Jianguoyun {
+                message.push_str(
+                    "。坚果云对分层自动建目录较敏感，请先在服务端手动创建上级目录后再重试。",
+                );
+            } else {
+                message.push_str("。请确认上级目录存在，或将 remote_root/profile 调整到可写路径。");
+            }
+        } else if operation == "MKCOL" && status == StatusCode::METHOD_NOT_ALLOWED {
+            message.push_str("。目录可能已存在，可忽略此状态。");
         }
     } else if operation == "MKCOL" && status == StatusCode::METHOD_NOT_ALLOWED {
         message.push_str("。目录可能已存在，可忽略此状态。");
+    } else if operation == "MKCOL" && status == StatusCode::CONFLICT {
+        message.push_str("。请确认上级目录存在，或将 remote_root/profile 调整到可写路径。");
     }
     AppError::Message(message)
 }
 
 fn with_service_hint(base_url: &str, message: impl Into<String>) -> String {
     let mut msg = message.into();
-    if is_jianguoyun(base_url) {
-        msg.push_str(
-            "。坚果云请优先使用「第三方应用密码」，并确认 base_url 指向 /dav/ 下的可写目录。",
-        );
+    if let Some(service) = detect_service_from_base_url(base_url) {
+        msg.push_str(&service.followup_hint());
     }
     msg
 }
@@ -257,16 +337,19 @@ pub async fn get_bytes(
                 )));
             }
         }
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| AppError::Message(format!("读取 WebDAV 响应失败: {e}")))?;
-        if bytes.len() as u64 > limit {
-            return Err(AppError::Message(format!(
-                "WebDAV 响应超过大小限制 ({limit} bytes)"
-            )));
+        let mut bytes = Vec::new();
+        let mut stream = resp.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk =
+                chunk.map_err(|e| AppError::Message(format!("读取 WebDAV 响应失败: {e}")))?;
+            if (bytes.len() as u64).saturating_add(chunk.len() as u64) > limit {
+                return Err(AppError::Message(format!(
+                    "WebDAV 响应超过大小限制 ({limit} bytes)"
+                )));
+            }
+            bytes.extend_from_slice(&chunk);
         }
-        Ok(Some((bytes.to_vec(), etag)))
+        Ok(Some((bytes, etag)))
     } else {
         let bytes = resp
             .bytes()
@@ -274,6 +357,37 @@ pub async fn get_bytes(
             .map_err(|e| AppError::Message(format!("读取 WebDAV 响应失败: {e}")))?;
         Ok(Some((bytes.to_vec(), etag)))
     }
+}
+
+pub async fn verify_readback_matches(
+    base_url: &str,
+    url: &str,
+    auth: &WebDavAuth,
+    expected_bytes: &[u8],
+    resource_name: &str,
+) -> Result<(), AppError> {
+    let max_bytes = u64::try_from(expected_bytes.len()).unwrap_or(u64::MAX);
+    let Some((readback, _)) = get_bytes(url, auth, Some(max_bytes)).await? else {
+        return Err(AppError::Message(with_service_hint(
+            base_url,
+            format!(
+                "WebDAV {resource_name} readback missing after PUT: {}",
+                redact_url(url)
+            ),
+        )));
+    };
+
+    if readback != expected_bytes {
+        return Err(AppError::Message(with_service_hint(
+            base_url,
+            format!(
+                "WebDAV {resource_name} readback mismatch: {}",
+                redact_url(url)
+            ),
+        )));
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -372,18 +486,82 @@ fn should_verify_after_mkcol(status: StatusCode) -> bool {
 
 /// DELETE a remote collection (directory). Returns Ok(true) if deleted,
 /// Ok(false) if 404/410 (already gone), Err on other failures.
-pub async fn delete_collection(url: &str, auth: &WebDavAuth) -> Result<bool, AppError> {
-    let client = build_client(30)?;
+pub async fn delete_resource(url: &str, auth: &WebDavAuth) -> Result<bool, AppError> {
+    let client = build_client(DEFAULT_TIMEOUT_SECS)?;
     let req = apply_auth(client.request(Method::DELETE, url), auth);
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| AppError::Message(format!("WebDAV DELETE {} failed: {e}", redact_url(url))))?;
+    let resp = req.send().await.map_err(|e| {
+        AppError::Message(with_service_hint(
+            url,
+            format!("WebDAV DELETE 请求失败: {}: {e}", redact_url(url)),
+        ))
+    })?;
     let status = resp.status();
     match status {
         s if s.is_success() => Ok(true),
         StatusCode::NOT_FOUND | StatusCode::GONE => Ok(false),
         _ => Err(webdav_status_error(url, "DELETE", status, url)),
+    }
+}
+
+pub async fn delete_collection(url: &str, auth: &WebDavAuth) -> Result<bool, AppError> {
+    delete_resource(url, auth).await
+}
+
+pub async fn verify_round_trip_readability(
+    base_url: &str,
+    dir_segments: &[String],
+    auth: &WebDavAuth,
+) -> Result<(), AppError> {
+    let probe_name = format!("cc-switch-probe-{}.tmp", Uuid::new_v4());
+    let mut probe_segments = dir_segments.to_vec();
+    probe_segments.push(probe_name);
+    let probe_url = build_remote_url(base_url, &probe_segments)?;
+    let probe_bytes = format!("cc-switch-webdav-probe:{}", Uuid::new_v4()).into_bytes();
+
+    let probe_result = async {
+        put_bytes(
+            &probe_url,
+            auth,
+            probe_bytes.clone(),
+            "application/octet-stream",
+        )
+        .await?;
+
+        verify_readback_matches(base_url, &probe_url, auth, &probe_bytes, "probe").await?;
+
+        Ok(())
+    }
+    .await;
+
+    let cleanup_result = delete_resource(&probe_url, auth).await;
+
+    match probe_result {
+        Ok(()) => {
+            match cleanup_result {
+                Ok(true) => {}
+                Ok(false) => {
+                    log::debug!(
+                        "[WebDAV] Probe cleanup DELETE reported missing after successful round trip: {}",
+                        redact_url(&probe_url)
+                    );
+                }
+                Err(err) => {
+                    log::debug!(
+                        "[WebDAV] Probe cleanup DELETE failed after successful round trip: {}: {err}",
+                        redact_url(&probe_url)
+                    );
+                }
+            }
+            Ok(())
+        }
+        Err(primary_err) => {
+            if let Err(cleanup_err) = cleanup_result {
+                log::debug!(
+                    "[WebDAV] Failed to clean up probe file after probe failure: {cleanup_err}"
+                );
+            }
+            Err(primary_err)
+        }
     }
 }
 
@@ -462,8 +640,22 @@ mod tests {
     #[test]
     fn is_jianguoyun_detects_known_hosts() {
         assert!(is_jianguoyun("https://dav.jianguoyun.com/dav"));
-        assert!(is_jianguoyun("https://dav.nutstore.net/dav"));
+        assert!(!is_jianguoyun("https://dav.nutstore.net/dav"));
         assert!(!is_jianguoyun("https://dav.example.com/dav"));
+    }
+
+    #[test]
+    fn webdav_status_error_uses_nutstore_name_in_hints() {
+        let err = webdav_status_error(
+            "https://dav.nutstore.net/dav/team-space",
+            "PROPFIND",
+            StatusCode::UNAUTHORIZED,
+            "https://dav.nutstore.net/dav/team-space",
+        );
+
+        let message = err.to_string();
+        assert!(message.contains("Nutstore"), "unexpected error: {message}");
+        assert!(!message.contains("坚果云"), "unexpected error: {message}");
     }
 
     #[test]
@@ -507,6 +699,20 @@ mod tests {
     fn parse_base_url_accepts_https() {
         let url = parse_base_url("https://example.com/dav/").unwrap();
         assert_eq!(url.scheme(), "https");
+    }
+
+    #[test]
+    fn jianguoyun_base_url_requires_dav_prefix() {
+        let err = parse_base_url("https://dav.jianguoyun.com")
+            .expect_err("jianguoyun root without /dav should be rejected");
+        assert!(err.to_string().contains("/dav"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn nutstore_base_url_requires_dav_prefix() {
+        let err = parse_base_url("https://dav.nutstore.net")
+            .expect_err("nutstore root without /dav should be rejected");
+        assert!(err.to_string().contains("/dav"), "unexpected error: {err}");
     }
 
     #[test]

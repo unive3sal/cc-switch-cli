@@ -1,11 +1,9 @@
+use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{OnceLock, RwLock};
-use url::Url;
-
-use crate::error::AppError;
 
 /// 自定义端点配置
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,14 +124,7 @@ impl WebDavSyncSettings {
                 "WebDAV base_url 不能为空".to_string(),
             ));
         }
-        let url = Url::parse(&self.base_url)
-            .map_err(|e| AppError::InvalidInput(format!("WebDAV base_url 不是合法 URL: {e}")))?;
-        let scheme = url.scheme();
-        if scheme != "http" && scheme != "https" {
-            return Err(AppError::InvalidInput(
-                "WebDAV base_url 仅支持 http/https".to_string(),
-            ));
-        }
+        crate::services::webdav::parse_base_url(&self.base_url)?;
         if self.remote_root.is_empty() || self.profile.is_empty() {
             return Err(AppError::InvalidInput(
                 "WebDAV remote_root/profile 不能为空".to_string(),

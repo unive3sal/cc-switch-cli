@@ -84,6 +84,80 @@ fn set_webdav_sync_settings_allows_disabled_empty_base_url() {
 }
 
 #[test]
+fn set_webdav_sync_settings_rejects_jianguoyun_base_url_without_dav() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let mut settings = sample_settings();
+    settings.base_url = "https://dav.jianguoyun.com".to_string();
+
+    let err = set_webdav_sync_settings(Some(settings))
+        .expect_err("jianguoyun root without /dav should be rejected");
+    assert!(err.to_string().contains("/dav"), "unexpected error: {err}");
+}
+
+#[test]
+fn set_webdav_sync_settings_rejects_nutstore_base_url_without_dav() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let mut settings = sample_settings();
+    settings.base_url = "https://dav.nutstore.net".to_string();
+
+    let err = set_webdav_sync_settings(Some(settings))
+        .expect_err("nutstore root without /dav should be rejected");
+    assert!(err.to_string().contains("/dav"), "unexpected error: {err}");
+}
+
+#[test]
+fn set_webdav_sync_settings_accepts_jianguoyun_base_url_with_dav() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let mut settings = sample_settings();
+    settings.base_url = "https://dav.jianguoyun.com/dav/team-space".to_string();
+
+    set_webdav_sync_settings(Some(settings)).expect("jianguoyun /dav url should be accepted");
+
+    let saved = get_webdav_sync_settings().expect("settings should be present after writing");
+    assert_eq!(saved.base_url, "https://dav.jianguoyun.com/dav/team-space");
+}
+
+#[test]
+fn set_webdav_sync_settings_accepts_nutstore_base_url_with_dav() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let mut settings = sample_settings();
+    settings.base_url = "https://dav.nutstore.net/dav/team-space".to_string();
+
+    set_webdav_sync_settings(Some(settings)).expect("nutstore /dav url should be accepted");
+
+    let saved = get_webdav_sync_settings().expect("settings should be present after writing");
+    assert_eq!(saved.base_url, "https://dav.nutstore.net/dav/team-space");
+}
+
+#[test]
+fn set_webdav_sync_settings_accepts_generic_provider_without_dav() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let mut settings = sample_settings();
+    settings.base_url = "https://webdav.example.com/files/user".to_string();
+
+    set_webdav_sync_settings(Some(settings))
+        .expect("generic WebDAV providers should not require /dav");
+
+    let saved = get_webdav_sync_settings().expect("settings should be present after writing");
+    assert_eq!(saved.base_url, "https://webdav.example.com/files/user");
+}
+
+#[test]
 fn jianguoyun_preset_sets_expected_defaults() {
     let preset = webdav_jianguoyun_preset(" demo@nutstore.com ", " app-password ");
     assert!(preset.enabled, "preset should enable webdav sync");
