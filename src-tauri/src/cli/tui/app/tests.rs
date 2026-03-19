@@ -6,6 +6,8 @@ mod tests {
     use crossterm::event::{KeyEvent, KeyModifiers};
     use serde_json::json;
 
+    use crate::cli::i18n::texts;
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
@@ -198,7 +200,7 @@ mod tests {
         ));
         assert!(matches!(
             app.on_key(key(KeyCode::Char('[')), &data()),
-            Action::SetAppType(AppType::OpenCode)
+            Action::SetAppType(AppType::OpenClaw)
         ));
     }
 
@@ -213,11 +215,21 @@ mod tests {
         let mut app = App::new(Some(AppType::OpenCode));
         assert!(matches!(
             app.on_key(key(KeyCode::Char(']')), &data()),
-            Action::SetAppType(AppType::Claude)
+            Action::SetAppType(AppType::OpenClaw)
         ));
         assert!(matches!(
             app.on_key(key(KeyCode::Char('[')), &data()),
             Action::SetAppType(AppType::Gemini)
+        ));
+
+        let mut app = App::new(Some(AppType::OpenClaw));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char(']')), &data()),
+            Action::SetAppType(AppType::Claude)
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('[')), &data()),
+            Action::SetAppType(AppType::OpenCode)
         ));
     }
 
@@ -467,6 +479,11 @@ mod tests {
             ),
             api_url: Some("https://example.com".to_string()),
             is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
         });
 
         let action = app.on_key(key(KeyCode::Enter), &data);
@@ -493,10 +510,541 @@ mod tests {
             ),
             api_url: Some("https://example.com".to_string()),
             is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
         });
 
         let action = app.on_key(key(KeyCode::Char('s')), &data);
         assert!(matches!(action, Action::ProviderSwitch { id } if id == "p1"));
+    }
+
+    #[test]
+    fn providers_c_key_requests_stream_check() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({"env":{"ANTHROPIC_BASE_URL":"https://example.com","ANTHROPIC_AUTH_TOKEN":"sk-demo"}}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('c')), &data);
+        assert!(matches!(action, Action::ProviderStreamCheck { id } if id == "p1"));
+        assert!(
+            matches!(app.overlay, Overlay::StreamCheckRunning { ref provider_name, .. } if provider_name == "Provider One")
+        );
+    }
+
+    #[test]
+    fn providers_c_key_is_noop_for_openclaw() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: false,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("claude-sonnet-4".to_string()),
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('c')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn openclaw_providers_s_key_adds_or_removes_live_config_membership() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: false,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("claude-sonnet-4".to_string()),
+            default_model_id: None,
+        });
+
+        let add_action = app.on_key(key(KeyCode::Char('s')), &data);
+        assert!(matches!(add_action, Action::ProviderSwitch { id } if id == "p1"));
+
+        data.providers.rows[0].is_in_config = true;
+        let remove_action = app.on_key(key(KeyCode::Char('s')), &data);
+        assert!(matches!(remove_action, Action::ProviderRemoveFromConfig { id } if id == "p1"));
+    }
+
+    #[test]
+    fn openclaw_providers_e_key_allows_editing_saved_only_provider() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "saved-only".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "saved-only".to_string(),
+                "Saved Only".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: false,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("saved-model".to_string()),
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('e')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(
+            app.form.is_some(),
+            "saved-only provider should open edit form"
+        );
+        assert!(app.toast.is_none(), "saved-only edit should not be blocked");
+    }
+
+    #[test]
+    fn openclaw_providers_x_key_sets_default_model_from_selected_provider() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("claude-sonnet-4".to_string()),
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('x')), &data);
+        assert!(matches!(
+            action,
+            Action::ProviderSetDefaultModel { provider_id, model_id }
+                if provider_id == "p1" && model_id == "claude-sonnet-4"
+        ));
+    }
+
+    #[test]
+    fn openclaw_providers_s_key_blocks_removing_fallback_only_default_provider() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p2".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p2".to_string(),
+                "Provider Two".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("shared-model".to_string()),
+            default_model_id: Some("shared-model".to_string()),
+        });
+
+        let action = app.on_key(key(KeyCode::Char('s')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+        assert!(
+            app.toast.is_some(),
+            "fallback-only default references should still block removing from live config"
+        );
+    }
+
+    #[test]
+    fn openclaw_providers_x_key_promotes_fallback_only_provider_even_when_model_matches_primary() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p2".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p2".to_string(),
+                "Provider Two".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("shared-model".to_string()),
+            default_model_id: Some("shared-model".to_string()),
+        });
+
+        let action = app.on_key(key(KeyCode::Char('x')), &data);
+        assert!(matches!(
+            action,
+            Action::ProviderSetDefaultModel { provider_id, model_id }
+                if provider_id == "p2" && model_id == "shared-model"
+        ));
+    }
+
+    #[test]
+    fn openclaw_providers_d_key_allows_deleting_provider_referenced_by_default_model() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("primary-model".to_string()),
+            default_model_id: Some("fallback-model".to_string()),
+        });
+
+        let action = app.on_key(key(KeyCode::Char('d')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::Confirm(ConfirmOverlay {
+                action: ConfirmAction::ProviderDelete { id },
+                ..
+            }) if id == "p1"
+        ));
+        assert!(
+            app.toast.is_none(),
+            "should not show a blocking warning toast"
+        );
+    }
+
+    #[test]
+    fn openclaw_providers_x_key_can_reset_default_back_to_primary_model() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: true,
+            primary_model_id: Some("primary-model".to_string()),
+            default_model_id: Some("fallback-model".to_string()),
+        });
+
+        let action = app.on_key(key(KeyCode::Char('x')), &data);
+        assert!(matches!(
+            action,
+            Action::ProviderSetDefaultModel { provider_id, model_id }
+                if provider_id == "p1" && model_id == "primary-model"
+        ));
+    }
+
+    #[test]
+    fn openclaw_providers_x_key_reapplies_primary_default_to_rebuild_fallbacks() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: true,
+            primary_model_id: Some("primary-model".to_string()),
+            default_model_id: Some("primary-model".to_string()),
+        });
+
+        let action = app.on_key(key(KeyCode::Char('x')), &data);
+        assert!(matches!(
+            action,
+            Action::ProviderSetDefaultModel { provider_id, model_id }
+                if provider_id == "p1" && model_id == "primary-model"
+        ));
+    }
+
+    #[test]
+    fn provider_detail_c_key_requests_stream_check() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::ProviderDetail {
+            id: "p1".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({"env":{"ANTHROPIC_BASE_URL":"https://example.com","ANTHROPIC_AUTH_TOKEN":"sk-demo"}}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('c')), &data);
+        assert!(matches!(action, Action::ProviderStreamCheck { id } if id == "p1"));
+        assert!(
+            matches!(app.overlay, Overlay::StreamCheckRunning { ref provider_name, .. } if provider_name == "Provider One")
+        );
+    }
+
+    #[test]
+    fn provider_detail_c_key_is_noop_for_openclaw() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ProviderDetail {
+            id: "p1".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: false,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("claude-sonnet-4".to_string()),
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('c')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn openclaw_provider_detail_x_key_sets_default_model() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ProviderDetail {
+            id: "p1".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("claude-sonnet-4".to_string()),
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('x')), &data);
+        assert!(matches!(
+            action,
+            Action::ProviderSetDefaultModel { provider_id, model_id }
+                if provider_id == "p1" && model_id == "claude-sonnet-4"
+        ));
+    }
+
+    #[test]
+    fn openclaw_provider_detail_e_key_allows_editing_saved_only_provider() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ProviderDetail {
+            id: "saved-only".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "saved-only".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "saved-only".to_string(),
+                "Saved Only".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: false,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("saved-model".to_string()),
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('e')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(
+            app.form.is_some(),
+            "saved-only provider should open edit form"
+        );
+        assert!(app.toast.is_none(), "saved-only edit should not be blocked");
+    }
+
+    #[test]
+    fn openclaw_provider_detail_x_key_can_reset_default_back_to_primary_model() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ProviderDetail {
+            id: "p1".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: true,
+            primary_model_id: Some("primary-model".to_string()),
+            default_model_id: Some("fallback-model".to_string()),
+        });
+
+        let action = app.on_key(key(KeyCode::Char('x')), &data);
+        assert!(matches!(
+            action,
+            Action::ProviderSetDefaultModel { provider_id, model_id }
+                if provider_id == "p1" && model_id == "primary-model"
+        ));
+    }
+
+    #[test]
+    fn openclaw_provider_detail_x_key_reapplies_primary_default_to_rebuild_fallbacks() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ProviderDetail {
+            id: "p1".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: true,
+            primary_model_id: Some("primary-model".to_string()),
+            default_model_id: Some("primary-model".to_string()),
+        });
+
+        let action = app.on_key(key(KeyCode::Char('x')), &data);
+        assert!(matches!(
+            action,
+            Action::ProviderSetDefaultModel { provider_id, model_id }
+                if provider_id == "p1" && model_id == "primary-model"
+        ));
     }
 
     #[test]
@@ -539,57 +1087,72 @@ mod tests {
     }
 
     #[test]
-    fn providers_c_key_requests_stream_check() {
-        let mut app = App::new(Some(AppType::Claude));
-        app.route = Route::Providers;
-        app.focus = Focus::Content;
-
-        let mut data = UiData::default();
-        data.providers.rows.push(super::super::data::ProviderRow {
-            id: "p1".to_string(),
-            provider: crate::provider::Provider::with_id(
-                "p1".to_string(),
-                "Provider One".to_string(),
-                json!({"env":{"ANTHROPIC_BASE_URL":"https://example.com","ANTHROPIC_AUTH_TOKEN":"sk-demo"}}),
-                None,
-            ),
-            api_url: Some("https://example.com".to_string()),
-            is_current: false,
-        });
-
-        let action = app.on_key(key(KeyCode::Char('c')), &data);
-        assert!(matches!(action, Action::ProviderStreamCheck { id } if id == "p1"));
-        assert!(
-            matches!(app.overlay, Overlay::StreamCheckRunning { ref provider_name, .. } if provider_name == "Provider One")
-        );
-    }
-
-    #[test]
-    fn provider_detail_c_key_requests_stream_check() {
-        let mut app = App::new(Some(AppType::Claude));
+    fn openclaw_provider_detail_s_key_blocks_removing_fallback_only_default_provider() {
+        let mut app = App::new(Some(AppType::OpenClaw));
         app.route = Route::ProviderDetail {
-            id: "p1".to_string(),
+            id: "p2".to_string(),
         };
         app.focus = Focus::Content;
 
         let mut data = UiData::default();
         data.providers.rows.push(super::super::data::ProviderRow {
-            id: "p1".to_string(),
+            id: "p2".to_string(),
             provider: crate::provider::Provider::with_id(
-                "p1".to_string(),
-                "Provider One".to_string(),
-                json!({"env":{"ANTHROPIC_BASE_URL":"https://example.com","ANTHROPIC_AUTH_TOKEN":"sk-demo"}}),
+                "p2".to_string(),
+                "Provider Two".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
                 None,
             ),
             api_url: Some("https://example.com".to_string()),
             is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("shared-model".to_string()),
+            default_model_id: Some("shared-model".to_string()),
         });
 
-        let action = app.on_key(key(KeyCode::Char('c')), &data);
-        assert!(matches!(action, Action::ProviderStreamCheck { id } if id == "p1"));
+        let action = app.on_key(key(KeyCode::Char('s')), &data);
+        assert!(matches!(action, Action::None));
         assert!(
-            matches!(app.overlay, Overlay::StreamCheckRunning { ref provider_name, .. } if provider_name == "Provider One")
+            app.toast.is_some(),
+            "fallback-only default references should still block removing from detail view"
         );
+    }
+
+    #[test]
+    fn openclaw_provider_detail_x_key_promotes_fallback_only_provider_even_when_model_matches_primary(
+    ) {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ProviderDetail {
+            id: "p2".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p2".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p2".to_string(),
+                "Provider Two".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("shared-model".to_string()),
+            default_model_id: Some("shared-model".to_string()),
+        });
+
+        let action = app.on_key(key(KeyCode::Char('x')), &data);
+        assert!(matches!(
+            action,
+            Action::ProviderSetDefaultModel { provider_id, model_id }
+                if provider_id == "p2" && model_id == "shared-model"
+        ));
     }
 
     #[test]
@@ -611,6 +1174,11 @@ mod tests {
             ),
             api_url: Some("https://example.com".to_string()),
             is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
         });
 
         let enter_action = app.on_key(key(KeyCode::Enter), &data);
@@ -857,6 +1425,11 @@ mod tests {
             ),
             api_url: Some("https://example.com".to_string()),
             is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
         });
 
         assert!(matches!(
@@ -1131,6 +1704,126 @@ mod tests {
     }
 
     #[test]
+    fn provider_add_form_openclaw_models_enter_opens_models_editor() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+        app.on_key(key(KeyCode::Enter), &data); // apply template -> fields
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = super::super::form::FormFocus::Fields;
+            form.editing = false;
+            let fields = form.fields();
+            form.field_idx = fields
+                .iter()
+                .position(|f| *f == ProviderAddField::OpenClawModels)
+                .expect("OpenClawModels field should exist");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.editor.as_ref().map(|e| (&e.kind, &e.submit)),
+            Some((
+                EditorKind::Json,
+                EditorSubmit::ProviderFormApplyOpenClawModels
+            ))
+        ));
+    }
+
+    #[test]
+    fn provider_add_form_openclaw_models_editor_ctrl_s_applies_models_array_back_to_form() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let data = UiData::default();
+        app.on_key(key(KeyCode::Char('a')), &data);
+        app.on_key(key(KeyCode::Enter), &data); // apply template -> fields
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_mut() {
+            form.focus = super::super::form::FormFocus::Fields;
+            form.editing = false;
+            let fields = form.fields();
+            form.field_idx = fields
+                .iter()
+                .position(|f| *f == ProviderAddField::OpenClawModels)
+                .expect("OpenClawModels field should exist");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+
+        app.on_key(key(KeyCode::Enter), &data);
+        let injected = r#"[
+  {
+    "id": "primary-model",
+    "name": "Primary Model",
+    "contextWindow": 128000,
+    "providerHint": "reasoning"
+  },
+  {
+    "id": "fallback-model",
+    "name": "Fallback Model",
+    "contextWindow": 64000
+  }
+]"#;
+        if let Some(editor) = app.editor.as_mut() {
+            editor.lines = injected.lines().map(|s| s.to_string()).collect();
+            editor.cursor_row = 0;
+            editor.cursor_col = 0;
+            editor.scroll = 0;
+        } else {
+            panic!("expected editor to be open");
+        }
+
+        let submit = app.on_key(ctrl(KeyCode::Char('s')), &data);
+        let Action::EditorSubmit { submit, content } = submit else {
+            panic!("expected EditorSubmit action");
+        };
+        assert!(matches!(
+            submit,
+            EditorSubmit::ProviderFormApplyOpenClawModels
+        ));
+
+        let models_value: serde_json::Value =
+            serde_json::from_str(&content).expect("valid json array");
+        if let Some(super::super::form::FormState::ProviderAdd(form)) = app.form.as_mut() {
+            let mut provider_value = form.to_provider_json_value();
+            let settings_value = provider_value
+                .as_object_mut()
+                .and_then(|obj| obj.get_mut("settingsConfig"))
+                .expect("settingsConfig should exist");
+            let settings_obj = settings_value
+                .as_object_mut()
+                .expect("settingsConfig should be object");
+            settings_obj.insert("models".to_string(), models_value);
+            form.apply_provider_json_value_to_fields(provider_value)
+                .expect("apply should succeed");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+        app.editor = None;
+
+        if let Some(FormState::ProviderAdd(form)) = app.form.as_ref() {
+            let provider_value = form.to_provider_json_value();
+            let models = provider_value["settingsConfig"]["models"]
+                .as_array()
+                .expect("models should remain an array");
+            assert_eq!(models.len(), 2);
+            assert_eq!(models[0]["id"], "primary-model");
+            assert_eq!(models[1]["id"], "fallback-model");
+            assert_eq!(models[0]["providerHint"], "reasoning");
+        } else {
+            panic!("expected ProviderAdd form");
+        }
+    }
+
+    #[test]
     fn provider_add_form_codex_preview_tab_then_enter_opens_config_editor() {
         let mut app = App::new(Some(AppType::Codex));
         app.route = Route::Providers;
@@ -1197,10 +1890,10 @@ mod tests {
         let mut app = App::new(Some(AppType::Claude));
         app.route = Route::Config;
         app.focus = Focus::Content;
-        app.config_idx = ConfigItem::ALL
+        app.config_idx = visible_config_items(&app.filter, &app.app_type)
             .iter()
             .position(|item| matches!(item, ConfigItem::WebDavSync))
-            .expect("WebDavSync missing from ConfigItem::ALL");
+            .expect("WebDavSync should be visible in the filtered config menu");
 
         let data = UiData::default();
         let action = app.on_key(key(KeyCode::Enter), &data);
@@ -1216,6 +1909,302 @@ mod tests {
                 .any(|item| matches!(item, ConfigItem::Proxy)),
             "Config menu should not expose a second proxy control entry"
         );
+    }
+
+    #[test]
+    fn openclaw_config_menu_exposes_env_tools_and_agents_items() {
+        let app = App::new(Some(AppType::OpenClaw));
+        let items = visible_config_items(&app.filter, &app.app_type);
+
+        assert!(items
+            .iter()
+            .any(|item| matches!(item, ConfigItem::OpenClawEnv)));
+        assert!(items
+            .iter()
+            .any(|item| matches!(item, ConfigItem::OpenClawTools)));
+        assert!(items
+            .iter()
+            .any(|item| matches!(item, ConfigItem::OpenClawAgents)));
+    }
+
+    #[test]
+    fn openclaw_config_item_metadata_keeps_visibility_label_route_and_title_aligned() {
+        let cases = [
+            (
+                ConfigItem::OpenClawEnv,
+                texts::tui_config_item_openclaw_env(),
+                texts::tui_openclaw_config_env_title(),
+                Route::ConfigOpenClawEnv,
+            ),
+            (
+                ConfigItem::OpenClawTools,
+                texts::tui_config_item_openclaw_tools(),
+                texts::tui_openclaw_config_tools_title(),
+                Route::ConfigOpenClawTools,
+            ),
+            (
+                ConfigItem::OpenClawAgents,
+                texts::tui_config_item_openclaw_agents_defaults(),
+                texts::tui_openclaw_config_agents_title(),
+                Route::ConfigOpenClawAgents,
+            ),
+        ];
+
+        for (item, label, detail_title, route) in cases {
+            assert!(item.visible_for_app(&AppType::OpenClaw));
+            assert!(!item.visible_for_app(&AppType::Claude));
+            assert_eq!(item.label(), label);
+            assert_eq!(item.detail_title(), Some(detail_title));
+            assert!(matches!(item.detail_route(), Some(actual) if actual == route));
+            assert!(
+                matches!(ConfigItem::from_openclaw_route(&route), Some(actual) if actual == item)
+            );
+        }
+    }
+
+    #[test]
+    fn non_openclaw_config_menu_hides_env_tools_and_agents_items() {
+        let app = App::new(Some(AppType::Claude));
+        let items = visible_config_items(&app.filter, &app.app_type);
+
+        assert!(!items
+            .iter()
+            .any(|item| matches!(item, ConfigItem::OpenClawEnv)));
+        assert!(!items
+            .iter()
+            .any(|item| matches!(item, ConfigItem::OpenClawTools)));
+        assert!(!items
+            .iter()
+            .any(|item| matches!(item, ConfigItem::OpenClawAgents)));
+    }
+
+    #[test]
+    fn openclaw_config_route_env_enter_opens_dedicated_subroute() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Config;
+        app.focus = Focus::Content;
+        app.config_idx = visible_config_items(&app.filter, &app.app_type)
+            .iter()
+            .position(|item| matches!(item, ConfigItem::OpenClawEnv))
+            .expect("OpenClaw Env config item should be visible");
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(
+            action,
+            Action::SwitchRoute(Route::ConfigOpenClawEnv)
+        ));
+        assert!(matches!(app.route, Route::ConfigOpenClawEnv));
+    }
+
+    #[test]
+    fn openclaw_config_route_tools_enter_opens_dedicated_subroute() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Config;
+        app.focus = Focus::Content;
+        app.config_idx = visible_config_items(&app.filter, &app.app_type)
+            .iter()
+            .position(|item| matches!(item, ConfigItem::OpenClawTools))
+            .expect("OpenClaw Tools config item should be visible");
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(
+            action,
+            Action::SwitchRoute(Route::ConfigOpenClawTools)
+        ));
+        assert!(matches!(app.route, Route::ConfigOpenClawTools));
+    }
+
+    #[test]
+    fn openclaw_config_route_agents_enter_opens_dedicated_subroute() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Config;
+        app.focus = Focus::Content;
+        app.config_idx = visible_config_items(&app.filter, &app.app_type)
+            .iter()
+            .position(|item| matches!(item, ConfigItem::OpenClawAgents))
+            .expect("OpenClaw Agents config item should be visible");
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        assert!(matches!(
+            action,
+            Action::SwitchRoute(Route::ConfigOpenClawAgents)
+        ));
+        assert!(matches!(app.route, Route::ConfigOpenClawAgents));
+    }
+
+    #[test]
+    fn openclaw_provider_edit_form_uses_saved_name_not_live_display_name() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "shared-id".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "shared-id".to_string(),
+                "Saved Snapshot Name".to_string(),
+                json!({
+                    "api": "openai-completions",
+                    "models": [
+                        {"id": "live-model", "name": "Live Model Name"}
+                    ]
+                }),
+                None,
+            ),
+            api_url: Some("https://live.example.com/v1".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("live-model".to_string()),
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('e')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.form.as_ref(),
+            Some(super::super::form::FormState::ProviderAdd(form))
+                if form.name.value == "Saved Snapshot Name"
+        ));
+    }
+
+    #[test]
+    fn openclaw_config_route_env_enter_opens_env_editor() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawEnv;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_env = Some(crate::openclaw_config::OpenClawEnvConfig {
+            vars: std::collections::HashMap::from([(
+                "OPENCLAW_ENV_TOKEN".to_string(),
+                json!("demo-token"),
+            )]),
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.editor
+                .as_ref()
+                .map(|editor| (&editor.kind, &editor.submit)),
+            Some((EditorKind::Json, EditorSubmit::ConfigOpenClawEnv))
+        ));
+        assert_eq!(
+            app.editor.as_ref().map(|editor| editor.title.as_str()),
+            Some(texts::tui_openclaw_config_env_editor_title())
+        );
+        assert!(app
+            .editor
+            .as_ref()
+            .expect("env editor should open")
+            .text()
+            .contains("OPENCLAW_ENV_TOKEN"));
+    }
+
+    #[test]
+    fn openclaw_config_route_tools_enter_opens_tools_editor() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("coding".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: Vec::new(),
+            extra: std::collections::HashMap::new(),
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.editor
+                .as_ref()
+                .map(|editor| (&editor.kind, &editor.submit)),
+            Some((EditorKind::Json, EditorSubmit::ConfigOpenClawTools))
+        ));
+        assert_eq!(
+            app.editor.as_ref().map(|editor| editor.title.as_str()),
+            Some(texts::tui_openclaw_config_tools_editor_title())
+        );
+        assert!(app
+            .editor
+            .as_ref()
+            .expect("tools editor should open")
+            .text()
+            .contains("coding"));
+    }
+
+    #[test]
+    fn openclaw_config_route_agents_enter_opens_agents_editor() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawAgents;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_agents_defaults =
+            Some(crate::openclaw_config::OpenClawAgentsDefaults {
+                model: Some(crate::openclaw_config::OpenClawDefaultModel {
+                    primary: "gpt-4.1".to_string(),
+                    fallbacks: vec!["gpt-4o-mini".to_string()],
+                    extra: std::collections::HashMap::new(),
+                }),
+                models: None,
+                extra: std::collections::HashMap::new(),
+            });
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.editor
+                .as_ref()
+                .map(|editor| (&editor.kind, &editor.submit)),
+            Some((EditorKind::Json, EditorSubmit::ConfigOpenClawAgents))
+        ));
+        assert_eq!(
+            app.editor.as_ref().map(|editor| editor.title.as_str()),
+            Some(texts::tui_openclaw_config_agents_editor_title())
+        );
+        assert!(app
+            .editor
+            .as_ref()
+            .expect("agents editor should open")
+            .text()
+            .contains("gpt-4.1"));
+    }
+
+    #[test]
+    fn openclaw_config_route_tools_edit_shortcut_opens_tools_editor() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.config.openclaw_tools = Some(crate::openclaw_config::OpenClawToolsConfig {
+            profile: Some("messaging".to_string()),
+            allow: vec!["Read".to_string()],
+            deny: vec!["Bash".to_string()],
+            extra: std::collections::HashMap::new(),
+        });
+
+        let action = app.on_key(key(KeyCode::Char('e')), &data);
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.editor
+                .as_ref()
+                .map(|editor| (&editor.kind, &editor.submit)),
+            Some((EditorKind::Json, EditorSubmit::ConfigOpenClawTools))
+        ));
     }
 
     #[test]
@@ -1948,6 +2937,11 @@ mod tests {
             ),
             api_url: Some("https://example.com".to_string()),
             is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
         });
 
         let action = app.on_key(key(KeyCode::Char('e')), &data);
@@ -1982,6 +2976,11 @@ mod tests {
             ),
             api_url: Some("https://example.com".to_string()),
             is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
         });
 
         app.on_key(key(KeyCode::Char('e')), &data);
@@ -2759,5 +3758,43 @@ mod tests {
             other => panic!("expected ProviderAdd form, got: {other:?}"),
         };
         assert_eq!(format, super::super::form::ClaudeApiFormat::OpenAiChat);
+    }
+
+    #[test]
+    fn openclaw_provider_edit_submit_uses_plain_edit_submit() {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+
+        let mut data = UiData::default();
+        data.providers.rows.push(super::super::data::ProviderRow {
+            id: "p1".to_string(),
+            provider: crate::provider::Provider::with_id(
+                "p1".to_string(),
+                "Provider One".to_string(),
+                json!({"apiKey":"sk-demo","baseUrl":"https://example.com"}),
+                None,
+            ),
+            api_url: Some("https://example.com".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("provider-model".to_string()),
+            default_model_id: None,
+        });
+
+        let action = app.on_key(key(KeyCode::Char('e')), &data);
+        assert!(matches!(action, Action::None));
+        assert!(app.form.is_some());
+
+        let submit = app.on_key(ctrl(KeyCode::Char('s')), &data);
+        assert!(matches!(
+            submit,
+            Action::EditorSubmit {
+                submit: EditorSubmit::ProviderEdit { id },
+                content,
+            } if id == "p1" && content.contains("Provider One")
+        ));
     }
 }

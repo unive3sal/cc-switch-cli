@@ -8,6 +8,9 @@ pub(crate) fn route_has_content_list(route: &Route) -> bool {
             | Route::Mcp
             | Route::Prompts
             | Route::Config
+            | Route::ConfigOpenClawEnv
+            | Route::ConfigOpenClawTools
+            | Route::ConfigOpenClawAgents
             | Route::ConfigWebDav
             | Route::Skills
             | Route::SkillsDiscover
@@ -26,6 +29,7 @@ pub(crate) fn route_default_focus(route: &Route) -> Focus {
 }
 
 pub(crate) fn visible_providers<'a>(
+    app_type: &AppType,
     filter: &FilterState,
     data: &'a UiData,
 ) -> Vec<&'a super::data::ProviderRow> {
@@ -36,10 +40,18 @@ pub(crate) fn visible_providers<'a>(
         .filter(|row| match &query {
             None => true,
             Some(q) => {
-                row.provider.name.to_lowercase().contains(q) || row.id.to_lowercase().contains(q)
+                super::data::provider_display_name(app_type, row)
+                    .to_lowercase()
+                    .contains(q)
+                    || row.provider.name.to_lowercase().contains(q)
+                    || row.id.to_lowercase().contains(q)
             }
         })
         .collect()
+}
+
+pub(crate) fn supports_provider_stream_check(app_type: &AppType) -> bool {
+    !matches!(app_type, AppType::OpenClaw)
 }
 
 pub(crate) fn visible_mcp<'a>(
@@ -156,31 +168,23 @@ pub(crate) fn visible_skills_unmanaged<'a>(
         .collect()
 }
 
-pub(crate) fn visible_config_items(filter: &FilterState) -> Vec<ConfigItem> {
-    let all = ConfigItem::ALL.to_vec();
+pub(crate) fn visible_config_items(filter: &FilterState, app_type: &AppType) -> Vec<ConfigItem> {
+    let all = ConfigItem::ALL
+        .iter()
+        .filter(|item| item.visible_for_app(app_type))
+        .cloned()
+        .collect::<Vec<_>>();
     let Some(q) = filter.query_lower() else {
         return all;
     };
 
     all.into_iter()
-        .filter(|item| config_item_label(item).to_lowercase().contains(&q))
+        .filter(|item| item.label().to_lowercase().contains(&q))
         .collect()
 }
 
 pub(crate) fn config_item_label(item: &ConfigItem) -> &'static str {
-    match item {
-        ConfigItem::Path => crate::cli::i18n::texts::tui_config_item_show_path(),
-        ConfigItem::ShowFull => crate::cli::i18n::texts::tui_config_item_show_full(),
-        ConfigItem::Export => crate::cli::i18n::texts::tui_config_item_export(),
-        ConfigItem::Import => crate::cli::i18n::texts::tui_config_item_import(),
-        ConfigItem::Backup => crate::cli::i18n::texts::tui_config_item_backup(),
-        ConfigItem::Restore => crate::cli::i18n::texts::tui_config_item_restore(),
-        ConfigItem::Validate => crate::cli::i18n::texts::tui_config_item_validate(),
-        ConfigItem::CommonSnippet => crate::cli::i18n::texts::tui_config_item_common_snippet(),
-        ConfigItem::Proxy => crate::cli::i18n::texts::tui_config_item_proxy(),
-        ConfigItem::WebDavSync => crate::cli::i18n::texts::tui_config_item_webdav_sync(),
-        ConfigItem::Reset => crate::cli::i18n::texts::tui_config_item_reset(),
-    }
+    item.label()
 }
 
 pub(crate) fn visible_webdav_config_items(filter: &FilterState) -> Vec<WebDavConfigItem> {
@@ -214,11 +218,13 @@ pub(crate) fn cycle_app_type(current: &AppType, dir: i8) -> AppType {
         (AppType::Claude, 1) => AppType::Codex,
         (AppType::Codex, 1) => AppType::Gemini,
         (AppType::Gemini, 1) => AppType::OpenCode,
-        (AppType::OpenCode, 1) => AppType::Claude,
-        (AppType::Claude, -1) => AppType::OpenCode,
+        (AppType::OpenCode, 1) => AppType::OpenClaw,
+        (AppType::OpenClaw, 1) => AppType::Claude,
+        (AppType::Claude, -1) => AppType::OpenClaw,
         (AppType::Codex, -1) => AppType::Claude,
         (AppType::Gemini, -1) => AppType::Codex,
         (AppType::OpenCode, -1) => AppType::Gemini,
+        (AppType::OpenClaw, -1) => AppType::OpenCode,
         (other, _) => other.clone(),
     }
 }
@@ -229,6 +235,7 @@ pub(crate) fn app_type_picker_index(app_type: &AppType) -> usize {
         AppType::Codex => 1,
         AppType::Gemini => 2,
         AppType::OpenCode => 3,
+        AppType::OpenClaw => 4,
     }
 }
 
@@ -237,6 +244,7 @@ pub(crate) fn app_type_for_picker_index(index: usize) -> AppType {
         1 => AppType::Codex,
         2 => AppType::Gemini,
         3 => AppType::OpenCode,
+        4 => AppType::OpenClaw,
         _ => AppType::Claude,
     }
 }

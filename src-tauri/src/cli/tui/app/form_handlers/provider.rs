@@ -284,11 +284,46 @@ impl App {
                 };
                 Action::None
             }
+            ProviderAddField::OpenClawApiProtocol => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider
+                    .opencode_npm_package
+                    .set(next_openclaw_api_protocol(
+                        &provider.opencode_npm_package.value,
+                    ));
+                Action::None
+            }
+            ProviderAddField::OpenClawUserAgent => {
+                let Some(FormState::ProviderAdd(provider)) = self.form.as_mut() else {
+                    return Action::None;
+                };
+                provider.openclaw_user_agent = !provider.openclaw_user_agent;
+                Action::None
+            }
             ProviderAddField::ClaudeModelConfig => {
                 self.overlay = Overlay::ClaudeModelPicker {
                     selected: 0,
                     editing: false,
                 };
+                Action::None
+            }
+            ProviderAddField::OpenClawModels => {
+                if matches!(key.code, KeyCode::Enter) {
+                    let Some(FormState::ProviderAdd(provider)) = self.form.as_ref() else {
+                        return Action::None;
+                    };
+                    self.open_editor(
+                        texts::tui_openclaw_models_editor_title(),
+                        EditorKind::Json,
+                        provider.openclaw_models_editor_text(),
+                        EditorSubmit::ProviderFormApplyOpenClawModels,
+                    );
+                    if let Some(editor) = self.editor.as_mut() {
+                        editor.mode = EditorMode::Edit;
+                    }
+                }
                 Action::None
             }
             ProviderAddField::CommonSnippet => {
@@ -592,4 +627,15 @@ fn collect_existing_provider_ids(data: &UiData) -> Vec<String> {
         .iter()
         .map(|row| row.id.clone())
         .collect()
+}
+
+fn next_openclaw_api_protocol(current: &str) -> &'static str {
+    let current = current.trim();
+    let protocols = &form::OPENCLAW_API_PROTOCOLS;
+    let next_idx = protocols
+        .iter()
+        .position(|candidate| *candidate == current)
+        .map(|idx| (idx + 1) % protocols.len())
+        .unwrap_or(0);
+    protocols[next_idx]
 }

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 mod claude;
 mod codex;
 #[cfg(test)]
@@ -38,6 +40,13 @@ use common::{
 /// 供应商相关业务逻辑
 pub struct ProviderService;
 
+fn current_timestamp() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
 #[cfg(test)]
 fn state_from_config(config: MultiAppConfig) -> AppState {
     let db = std::sync::Arc::new(crate::Database::memory().expect("create memory database"));
@@ -60,6 +69,35 @@ struct PostCommitAction {
 }
 
 impl ProviderService {
+    pub(crate) fn valid_openclaw_live_provider_ids() -> Result<Option<HashSet<String>>, AppError> {
+        if !crate::openclaw_config::get_openclaw_config_path().exists() {
+            return Ok(None);
+        }
+
+        let mut valid_provider_ids = HashSet::new();
+        for (provider_id, live_provider) in crate::openclaw_config::get_providers()? {
+            if provider_id.trim().is_empty() {
+                continue;
+            }
+
+            let Ok(config) = Self::parse_openclaw_provider_settings(&live_provider) else {
+                continue;
+            };
+
+            if Self::validate_openclaw_provider_models(&provider_id, &config).is_err() {
+                continue;
+            }
+
+            if config.models.iter().any(|model| model.id.trim().is_empty()) {
+                continue;
+            }
+
+            valid_provider_ids.insert(provider_id);
+        }
+
+        Ok(Some(valid_provider_ids))
+    }
+
     fn parse_common_opencode_config_snippet(snippet: &str) -> Result<Value, AppError> {
         let value: Value = serde_json::from_str(snippet).map_err(|e| {
             AppError::localized(
@@ -386,6 +424,26 @@ impl ProviderService {
                 }
                 state.save()?;
             }
+            AppType::OpenClaw => {
+                let providers = crate::openclaw_config::get_providers()?;
+                let live_after = providers.get(provider_id).cloned().ok_or_else(|| {
+                    AppError::localized(
+                        "openclaw.live.missing_provider",
+                        format!("OpenClaw live 配置中缺少供应商: {provider_id}"),
+                        format!("OpenClaw live config missing provider: {provider_id}"),
+                    )
+                })?;
+
+                {
+                    let mut guard = state.config.write().map_err(AppError::from)?;
+                    if let Some(manager) = guard.get_manager_mut(app_type) {
+                        if let Some(target) = manager.providers.get_mut(provider_id) {
+                            target.settings_config = live_after;
+                        }
+                    }
+                }
+                state.save()?;
+            }
         }
         Ok(())
     }
@@ -417,7 +475,7 @@ impl ProviderService {
             AppType::Gemini => {
                 Self::parse_common_gemini_config_snippet(snippet)?;
             }
-            AppType::OpenCode => {
+            AppType::OpenCode | AppType::OpenClaw => {
                 Self::parse_common_opencode_config_snippet(snippet)?;
             }
         }
@@ -456,7 +514,7 @@ impl ProviderService {
             AppType::Claude => Self::migrate_claude_common_config_snippet(config, old_snippet),
             AppType::Codex => Self::migrate_codex_common_config_snippet(config, old_snippet),
             AppType::Gemini => Self::migrate_gemini_common_config_snippet(config, old_snippet),
-            AppType::OpenCode => Ok(()),
+            AppType::OpenCode | AppType::OpenClaw => Ok(()),
         };
 
         match result {
@@ -519,6 +577,33 @@ impl ProviderService {
         }))
     }
 
+    fn resolve_live_apply_common_config(
+        app_type: &AppType,
+        provider: &Provider,
+        common_config_snippet: Option<&str>,
+        requested_apply_common_config: bool,
+    ) -> bool {
+        if !requested_apply_common_config {
+            return false;
+        }
+
+        if common_config_snippet
+            .map(str::trim)
+            .is_none_or(|snippet| snippet.is_empty())
+        {
+            return false;
+        }
+
+        match app_type {
+            AppType::Claude | AppType::Codex | AppType::Gemini => provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.apply_common_config)
+                .unwrap_or(true),
+            AppType::OpenCode | AppType::OpenClaw => false,
+        }
+    }
+
     fn normalize_provider_for_storage(
         app_type: &AppType,
         provider: &mut Provider,
@@ -534,7 +619,7 @@ impl ProviderService {
             AppType::Gemini => {
                 Self::strip_common_gemini_config_from_provider(provider, common_config_snippet)?;
             }
-            AppType::OpenCode => {}
+            AppType::OpenCode | AppType::OpenClaw => {}
         }
 
         Ok(())
@@ -782,6 +867,11 @@ impl ProviderService {
         Ok(manager.get_all_providers().clone())
     }
 
+    pub(crate) fn sync_openclaw_providers_from_live(state: &AppState) -> Result<(), AppError> {
+        live::sync_openclaw_providers_from_live(state)?;
+        Ok(())
+    }
+
     /// 获取当前供应商 ID
     pub fn current(state: &AppState, app_type: AppType) -> Result<String, AppError> {
         if app_type.is_additive_mode() {
@@ -833,6 +923,13 @@ impl ProviderService {
                 &mut provider_to_store,
                 common_config_snippet.as_deref(),
             )?;
+
+            if matches!(app_type_clone, AppType::OpenClaw)
+                && provider_to_store.created_at.is_none()
+                && live::is_auto_mirrored_openclaw_snapshot(&provider_to_store)
+            {
+                provider_to_store.created_at = Some(current_timestamp());
+            }
 
             config.ensure_app(&app_type_clone);
             let previous_current = config
@@ -947,6 +1044,12 @@ impl ProviderService {
                         updated.meta = Some(new_meta);
                     }
                 }
+                if matches!(app_type_clone, AppType::OpenClaw)
+                    && updated.created_at.is_none()
+                    && live::is_auto_mirrored_openclaw_snapshot(&updated)
+                {
+                    updated.created_at = Some(current_timestamp());
+                }
                 updated
             } else {
                 provider_clone.clone()
@@ -1000,6 +1103,10 @@ impl ProviderService {
     /// 导入当前 live 配置为默认供应商
     pub fn import_default_config(state: &AppState, app_type: AppType) -> Result<(), AppError> {
         if app_type.is_additive_mode() {
+            if matches!(app_type, AppType::OpenClaw) {
+                return Ok(());
+            }
+
             let providers = crate::opencode_config::get_providers()?;
             if providers.is_empty() {
                 return Ok(());
@@ -1103,6 +1210,7 @@ impl ProviderService {
                 })
             }
             AppType::OpenCode => unreachable!("additive mode apps are handled earlier"),
+            AppType::OpenClaw => unreachable!("additive mode apps are handled earlier"),
         };
 
         let mut provider = Provider::with_id(
@@ -1220,6 +1328,17 @@ impl ProviderService {
                 }
                 crate::opencode_config::read_opencode_config()
             }
+            AppType::OpenClaw => {
+                let config_path = crate::openclaw_config::get_openclaw_config_path();
+                if !config_path.exists() {
+                    return Err(AppError::localized(
+                        "openclaw.config.missing",
+                        "OpenClaw 配置文件不存在",
+                        "OpenClaw configuration file not found",
+                    ));
+                }
+                crate::openclaw_config::read_openclaw_config()
+            }
         }
     }
 
@@ -1288,7 +1407,25 @@ impl ProviderService {
             result
         };
 
+        let openclaw_live_provider_ids = match Self::valid_openclaw_live_provider_ids() {
+            Ok(provider_ids) => provider_ids,
+            Err(err) => {
+                log::warn!(
+                    "sync_current_to_live: 读取 OpenClaw live providers 失败，跳过 OpenClaw 同步: {err}"
+                );
+                None
+            }
+        };
+
         for (app_type, provider, snippet) in &snapshots {
+            if matches!(app_type, AppType::OpenClaw)
+                && !openclaw_live_provider_ids
+                    .as_ref()
+                    .is_some_and(|provider_ids| provider_ids.contains(&provider.id))
+            {
+                continue;
+            }
+
             if let Err(e) = Self::write_live_snapshot(app_type, provider, snippet.as_deref(), true)
             {
                 log::warn!("sync_current_to_live: 写入 {app_type} live 配置失败: {e}");
@@ -1347,7 +1484,7 @@ impl ProviderService {
                     app_type: app_type_clone.clone(),
                     provider,
                     backup: Self::capture_live_snapshot(&app_type_clone)?,
-                    sync_mcp: true,
+                    sync_mcp: matches!(app_type_clone, AppType::OpenCode),
                     refresh_snapshot: false,
                     common_config_snippet: config
                         .common_config_snippets
@@ -1400,6 +1537,7 @@ impl ProviderService {
                 AppType::Claude => Self::prepare_switch_claude(config, &provider_id_owned)?,
                 AppType::Gemini => Self::prepare_switch_gemini(config, &provider_id_owned)?,
                 AppType::OpenCode => unreachable!("additive mode handled above"),
+                AppType::OpenClaw => unreachable!("additive mode handled above"),
             };
 
             let action = PostCommitAction {
@@ -1422,6 +1560,13 @@ impl ProviderService {
         common_config_snippet: Option<&str>,
         apply_common_config: bool,
     ) -> Result<(), AppError> {
+        let apply_common_config = Self::resolve_live_apply_common_config(
+            app_type,
+            provider,
+            common_config_snippet,
+            apply_common_config,
+        );
+
         match app_type {
             AppType::Codex => {
                 Self::write_codex_live(provider, common_config_snippet, apply_common_config)
@@ -1463,6 +1608,110 @@ impl ProviderService {
                     Err(_) => crate::opencode_config::set_provider(&provider.id, config_to_write),
                 }
             }
+            AppType::OpenClaw => {
+                let settings_config = provider.settings_config.clone();
+                let looks_like_provider = settings_config.get("baseUrl").is_some()
+                    || settings_config.get("api").is_some()
+                    || settings_config.get("models").is_some();
+                if !looks_like_provider {
+                    return Ok(());
+                }
+
+                let config = Self::parse_openclaw_provider_settings(&settings_config)?;
+                Self::validate_openclaw_provider_models(&provider.id, &config)?;
+                let write_result =
+                    crate::openclaw_config::set_typed_provider(&provider.id, &config).map(|_| ());
+
+                write_result.map_err(Self::normalize_openclaw_live_write_error)
+            }
+        }
+    }
+
+    fn parse_openclaw_provider_settings(
+        settings_config: &Value,
+    ) -> Result<crate::provider::OpenClawProviderConfig, AppError> {
+        let settings_obj = settings_config.as_object().ok_or_else(|| {
+            AppError::localized(
+                "provider.openclaw.settings.not_object",
+                "OpenClaw 配置必须是 JSON 对象",
+                "OpenClaw configuration must be a JSON object",
+            )
+        })?;
+
+        let legacy_aliases = Self::collect_openclaw_legacy_aliases(settings_obj);
+        if !legacy_aliases.is_empty() {
+            let aliases = legacy_aliases.join(", ");
+            return Err(AppError::localized(
+                "provider.openclaw.settings.invalid",
+                format!(
+                    "OpenClaw 配置使用了不支持的旧字段: {aliases}。请改用规范 OpenClaw 字段。"
+                ),
+                format!(
+                    "OpenClaw config uses unsupported legacy alias keys: {aliases}. Use canonical OpenClaw keys instead."
+                ),
+            ));
+        }
+
+        serde_json::from_value(settings_config.clone()).map_err(|err| {
+            AppError::localized(
+                "provider.openclaw.settings.invalid",
+                format!("OpenClaw 配置格式无效: {err}"),
+                format!("OpenClaw provider schema is invalid: {err}"),
+            )
+        })
+    }
+
+    fn validate_openclaw_provider_models(
+        provider_id: &str,
+        config: &crate::provider::OpenClawProviderConfig,
+    ) -> Result<(), AppError> {
+        if config.models.is_empty() {
+            return Err(AppError::localized(
+                "provider.openclaw.models.missing",
+                format!("OpenClaw 供应商 {provider_id} 至少需要一个模型"),
+                format!("OpenClaw provider {provider_id} must define at least one model"),
+            ));
+        }
+
+        Ok(())
+    }
+
+    fn collect_openclaw_legacy_aliases(
+        settings_obj: &serde_json::Map<String, Value>,
+    ) -> Vec<String> {
+        let mut aliases = Vec::new();
+
+        for alias in ["api_key", "base_url", "options", "npm"] {
+            if settings_obj.contains_key(alias) {
+                aliases.push(alias.to_string());
+            }
+        }
+
+        if let Some(models) = settings_obj.get("models").and_then(Value::as_array) {
+            for (index, model) in models.iter().enumerate() {
+                if let Some(model_obj) = model.as_object() {
+                    if model_obj.contains_key("context_window") {
+                        aliases.push(format!("models[{index}].context_window"));
+                    }
+                }
+            }
+        }
+
+        aliases
+    }
+
+    fn normalize_openclaw_live_write_error(err: AppError) -> AppError {
+        match err {
+            AppError::Config(message)
+                if message.starts_with("Failed to parse OpenClaw config as JSON5:") =>
+            {
+                AppError::Config(message.replacen(
+                    "Failed to parse OpenClaw config as JSON5",
+                    "Failed to parse OpenClaw config as round-trip JSON5 document",
+                    1,
+                ))
+            }
+            other => other,
         }
     }
 
@@ -1472,6 +1721,13 @@ impl ProviderService {
         common_config_snippet: Option<&str>,
         apply_common_config: bool,
     ) -> Result<Value, AppError> {
+        let apply_common_config = Self::resolve_live_apply_common_config(
+            app_type,
+            provider,
+            common_config_snippet,
+            apply_common_config,
+        );
+
         match app_type {
             AppType::Claude => {
                 let mut provider_content = provider.settings_config.clone();
@@ -1650,6 +1906,9 @@ impl ProviderService {
             AppType::OpenCode => Err(AppError::Config(
                 "OpenCode does not support proxy takeover backups".into(),
             )),
+            AppType::OpenClaw => Err(AppError::Config(
+                "OpenClaw does not support proxy takeover backups".into(),
+            )),
         }
     }
 
@@ -1748,6 +2007,10 @@ impl ProviderService {
                     ));
                 }
             }
+            AppType::OpenClaw => {
+                let config = Self::parse_openclaw_provider_settings(&provider.settings_config)?;
+                Self::validate_openclaw_provider_models(&provider.id, &config)?;
+            }
         }
 
         // 🔧 验证并清理 UsageScript 配置（所有应用类型通用）
@@ -1793,8 +2056,18 @@ impl ProviderService {
         };
 
         if app_type.is_additive_mode() {
-            if crate::opencode_config::get_opencode_dir().exists() {
-                crate::opencode_config::remove_provider(provider_id)?;
+            match app_type {
+                AppType::OpenCode => {
+                    if crate::opencode_config::get_opencode_dir().exists() {
+                        crate::opencode_config::remove_provider(provider_id)?;
+                    }
+                }
+                AppType::OpenClaw => {
+                    if crate::openclaw_config::get_openclaw_dir().exists() {
+                        crate::openclaw_config::remove_provider(provider_id)?;
+                    }
+                }
+                _ => unreachable!("non-additive apps should not enter additive delete branch"),
             }
 
             {
@@ -1829,6 +2102,9 @@ impl ProviderService {
             AppType::OpenCode => {
                 let _ = provider_snapshot;
             }
+            AppType::OpenClaw => {
+                let _ = provider_snapshot;
+            }
         }
 
         {
@@ -1849,6 +2125,10 @@ impl ProviderService {
         }
 
         state.save()
+    }
+
+    pub fn import_openclaw_providers_from_live(state: &AppState) -> Result<usize, AppError> {
+        live::import_openclaw_providers_from_live(state)
     }
 }
 

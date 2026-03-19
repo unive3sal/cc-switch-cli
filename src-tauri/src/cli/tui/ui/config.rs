@@ -1,31 +1,27 @@
 use super::*;
+use serde::Serialize;
+
 use crate::cli::tui::app::LocalProxySettingsItem;
 
 pub(super) fn config_items_filtered(app: &App) -> Vec<ConfigItem> {
-    let Some(q) = app.filter.query_lower() else {
-        return ConfigItem::ALL.to_vec();
-    };
-    ConfigItem::ALL
+    let items = ConfigItem::ALL
         .iter()
+        .filter(|item| item.visible_for_app(&app.app_type))
         .cloned()
-        .filter(|item| config_item_label(item).to_lowercase().contains(&q))
+        .collect::<Vec<_>>();
+
+    let Some(q) = app.filter.query_lower() else {
+        return items;
+    };
+
+    items
+        .into_iter()
+        .filter(|item| item.label().to_lowercase().contains(&q))
         .collect()
 }
 
 pub(super) fn config_item_label(item: &ConfigItem) -> &'static str {
-    match item {
-        ConfigItem::Path => texts::tui_config_item_show_path(),
-        ConfigItem::ShowFull => texts::tui_config_item_show_full(),
-        ConfigItem::Export => texts::tui_config_item_export(),
-        ConfigItem::Import => texts::tui_config_item_import(),
-        ConfigItem::Backup => texts::tui_config_item_backup(),
-        ConfigItem::Restore => texts::tui_config_item_restore(),
-        ConfigItem::Validate => texts::tui_config_item_validate(),
-        ConfigItem::CommonSnippet => texts::tui_config_item_common_snippet(),
-        ConfigItem::Proxy => texts::tui_config_item_proxy(),
-        ConfigItem::WebDavSync => texts::tui_config_item_webdav_sync(),
-        ConfigItem::Reset => texts::tui_config_item_reset(),
-    }
+    item.label()
 }
 
 pub(super) fn webdav_config_items_filtered(app: &App) -> Vec<WebDavConfigItem> {
@@ -146,6 +142,181 @@ pub(super) fn render_config_webdav(
     let mut state = TableState::default();
     state.select(Some(app.config_webdav_idx));
     frame.render_stateful_widget(table, inset_left(chunks[1], CONTENT_INSET_LEFT), &mut state);
+}
+
+pub(super) fn render_config_openclaw_route(
+    frame: &mut Frame<'_>,
+    app: &App,
+    data: &UiData,
+    area: Rect,
+    theme: &super::theme::Theme,
+) {
+    let Some(item) = ConfigItem::from_openclaw_route(&app.route) else {
+        return;
+    };
+
+    let title = item
+        .detail_title()
+        .expect("OpenClaw config route should define a title");
+
+    match item {
+        ConfigItem::OpenClawEnv => render_openclaw_config_section(
+            frame,
+            app,
+            area,
+            theme,
+            title,
+            "env.",
+            data.config.openclaw_env.as_ref(),
+            data.config.openclaw_config_path.as_deref(),
+            data.config.openclaw_warnings.as_deref(),
+        ),
+        ConfigItem::OpenClawTools => render_openclaw_config_section(
+            frame,
+            app,
+            area,
+            theme,
+            title,
+            "tools.",
+            data.config.openclaw_tools.as_ref(),
+            data.config.openclaw_config_path.as_deref(),
+            data.config.openclaw_warnings.as_deref(),
+        ),
+        ConfigItem::OpenClawAgents => render_openclaw_config_section(
+            frame,
+            app,
+            area,
+            theme,
+            title,
+            "agents.defaults",
+            data.config.openclaw_agents_defaults.as_ref(),
+            data.config.openclaw_config_path.as_deref(),
+            data.config.openclaw_warnings.as_deref(),
+        ),
+        _ => {}
+    }
+}
+
+fn render_openclaw_config_section<T: Serialize>(
+    frame: &mut Frame<'_>,
+    app: &App,
+    area: Rect,
+    theme: &super::theme::Theme,
+    title: &'static str,
+    warning_prefix: &'static str,
+    section: Option<&T>,
+    config_path: Option<&std::path::Path>,
+    warnings: Option<&[crate::openclaw_config::OpenClawHealthWarning]>,
+) {
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pane_border_style(app, Focus::Content, theme))
+        .title(title);
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let config_path_display = config_path.map(|path| path.display().to_string());
+    let section_warnings = warnings
+        .unwrap_or_default()
+        .iter()
+        .filter(|warning| {
+            openclaw_warning_matches_section(
+                warning,
+                warning_prefix,
+                config_path_display.as_deref(),
+            )
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let has_warnings = !section_warnings.is_empty();
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(if has_warnings { 4 } else { 0 }),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+    if app.focus == Focus::Content {
+        render_key_bar_center(
+            frame,
+            chunks[0],
+            theme,
+            &[
+                ("Enter", texts::tui_key_edit()),
+                ("e", texts::tui_key_edit()),
+                ("Esc", texts::tui_key_close()),
+            ],
+        );
+    }
+
+    let section_json = section
+        .map(|section| {
+            let section_value = serde_json::to_value(section).unwrap_or_else(|_| Value::Null);
+            let redacted = redact_sensitive_json(&section_value);
+            serde_json::to_string_pretty(&redacted).unwrap_or_else(|_| "{}".to_string())
+        })
+        .unwrap_or_else(|| "null".to_string());
+
+    if has_warnings {
+        let banner = section_warnings
+            .iter()
+            .map(|warning| match warning.path.as_deref() {
+                Some(path) => format!("- {} ({path})", warning.message),
+                None => format!("- {}", warning.message),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        frame.render_widget(
+            Paragraph::new(format!(
+                "{}\n{}",
+                texts::tui_openclaw_config_warning_title(),
+                banner,
+            ))
+            .style(Style::default().fg(theme.warn))
+            .wrap(Wrap { trim: false }),
+            inset_left(chunks[1], CONTENT_INSET_LEFT),
+        );
+    }
+
+    let content = format!(
+        "{}\n{}\n\n{}\n{}\n\n{}\n{}",
+        texts::tui_openclaw_config_file_label(),
+        config_path_display
+            .unwrap_or_else(|| texts::tui_openclaw_config_path_not_available().to_string()),
+        texts::tui_openclaw_config_section_label(),
+        section_json,
+        texts::tui_openclaw_config_warning_state_label(),
+        if has_warnings {
+            texts::tui_openclaw_config_warning_present().to_string()
+        } else {
+            texts::tui_openclaw_config_warning_clean().to_string()
+        }
+    );
+
+    frame.render_widget(
+        Paragraph::new(content).wrap(Wrap { trim: false }),
+        inset_left(chunks[2], CONTENT_INSET_LEFT),
+    );
+}
+
+fn openclaw_warning_matches_section(
+    warning: &crate::openclaw_config::OpenClawHealthWarning,
+    warning_prefix: &str,
+    config_path: Option<&str>,
+) -> bool {
+    if warning.code == "config_parse_failed" {
+        return true;
+    }
+
+    match warning.path.as_deref() {
+        None => true,
+        Some(path) if config_path == Some(path) => true,
+        Some(path) => path.starts_with(warning_prefix),
+    }
 }
 
 pub(super) fn render_settings(

@@ -5,12 +5,12 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app_config::AppType,
-    cli::i18n::texts,
+    cli::i18n::{texts, use_test_language, Language},
     cli::tui::{
         app,
         app::{
-            App, ConfirmAction, ConfirmOverlay, EditorKind, EditorSubmit, Focus, Overlay,
-            TextInputState, TextSubmit,
+            App, ConfigItem, ConfirmAction, ConfirmOverlay, EditorKind, EditorSubmit, Focus,
+            Overlay, TextInputState, TextSubmit,
         },
         data::{
             ConfigSnapshot, McpSnapshot, PromptsSnapshot, ProviderRow, ProvidersSnapshot,
@@ -45,6 +45,65 @@ fn provider_form_shows_full_api_key_in_table_value() {
         crate::cli::tui::form::ProviderAddField::ClaudeApiKey,
     );
     assert_eq!(value, "sk-test-1234567890");
+}
+
+#[test]
+fn openclaw_tui_form_masks_api_key_in_default_view() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+
+    let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::OpenClaw);
+    form.focus = FormFocus::Fields;
+    form.id.set("p1");
+    form.name.set("Saved Snapshot Name");
+    form.opencode_api_key.set("sk-openclaw-secret");
+    form.opencode_base_url
+        .set("https://api.openclaw.example/v1");
+    form.field_idx = form
+        .fields()
+        .iter()
+        .position(|field| *field == ProviderAddField::OpenCodeApiKey)
+        .expect("OpenClaw API key field should exist");
+    app.form = Some(crate::cli::tui::form::FormState::ProviderAdd(form));
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(all.contains("[redacted]"), "{all}");
+    assert!(!all.contains("sk-openclaw-secret"), "{all}");
+}
+
+#[test]
+fn redact_sensitive_json_keeps_non_secret_token_count_fields_visible() {
+    let value = json!({
+        "env": {
+            "AWS_SECRET_ACCESS_KEY": "aws-secret-value",
+            "AWS_ACCESS_KEY_ID": "AKIA1234567890"
+        },
+        "models": [
+            {
+                "maxTokens": 8192,
+                "apiKey": "sk-openclaw-secret"
+            }
+        ],
+        "tokenLimit": 12345,
+        "password": "hidden"
+    });
+
+    let redacted = super::redact_sensitive_json(&value);
+
+    assert_eq!(
+        redacted["env"]["AWS_SECRET_ACCESS_KEY"],
+        json!("[redacted]")
+    );
+    assert_eq!(redacted["env"]["AWS_ACCESS_KEY_ID"], json!("[redacted]"));
+    assert_eq!(redacted["models"][0]["maxTokens"], json!(8192));
+    assert_eq!(redacted["tokenLimit"], json!(12345));
+    assert_eq!(redacted["models"][0]["apiKey"], json!("[redacted]"));
+    assert_eq!(redacted["password"], json!("[redacted]"));
 }
 
 #[test]
@@ -234,6 +293,11 @@ fn minimal_data(_app_type: &AppType) -> UiData {
                 provider,
                 api_url: Some("https://example.com".to_string()),
                 is_current: false,
+                is_in_config: true,
+                is_saved: true,
+                is_default_model: false,
+                primary_model_id: Some("claude-sonnet-4".to_string()),
+                default_model_id: None,
             }],
         },
         mcp: McpSnapshot::default(),
@@ -2449,6 +2513,208 @@ fn backup_picker_overlay_shows_hint() {
 }
 
 #[test]
+fn openclaw_config_route_render_uses_dedicated_env_page() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawEnv;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_env = Some(crate::openclaw_config::OpenClawEnvConfig {
+        vars: std::collections::HashMap::from([(
+            "OPENCLAW_ENV_TOKEN".to_string(),
+            json!("demo-token"),
+        )]),
+    });
+    data.config.openclaw_warnings = Some(vec![crate::openclaw_config::OpenClawHealthWarning {
+        code: "stringified_env_vars".to_string(),
+        message: "env.vars should be an object".to_string(),
+        path: Some("env.vars".to_string()),
+    }]);
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(matches!(
+        ConfigItem::from_openclaw_route(&app.route),
+        Some(ConfigItem::OpenClawEnv)
+    ));
+    assert!(all.contains(
+        ConfigItem::OpenClawEnv
+            .detail_title()
+            .expect("OpenClaw Env route should have a title")
+    ));
+    assert!(all.contains("OPENCLAW_ENV_TOKEN"));
+    assert!(all.contains(texts::tui_openclaw_config_warning_title()));
+    assert!(all.contains("env.vars"));
+    assert!(!all.contains(super::config_item_label(&ConfigItem::ShowFull)));
+}
+
+#[test]
+fn openclaw_tui_config_routes_redact_sensitive_json_values() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    for (route, setup) in [
+        (
+            Route::ConfigOpenClawEnv,
+            json!({
+                "vars": {
+                    "OPENCLAW_ENV_TOKEN": "env-secret"
+                }
+            }),
+        ),
+        (
+            Route::ConfigOpenClawTools,
+            json!({
+                "demo": {
+                    "apiKey": "tools-secret"
+                }
+            }),
+        ),
+        (
+            Route::ConfigOpenClawAgents,
+            json!({
+                "default": {
+                    "Authorization": "Bearer agents-secret"
+                }
+            }),
+        ),
+    ] {
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = route;
+        app.focus = Focus::Content;
+
+        let mut data = minimal_data(&app.app_type);
+        match app.route {
+            Route::ConfigOpenClawEnv => {
+                data.config.openclaw_env =
+                    Some(serde_json::from_value(setup.clone()).expect("valid env section"));
+            }
+            Route::ConfigOpenClawTools => {
+                data.config.openclaw_tools =
+                    Some(serde_json::from_value(setup.clone()).expect("valid tools section"));
+            }
+            Route::ConfigOpenClawAgents => {
+                data.config.openclaw_agents_defaults =
+                    Some(serde_json::from_value(setup.clone()).expect("valid agents section"));
+            }
+            _ => unreachable!(),
+        }
+
+        let all = all_text(&render(&app, &data));
+        assert!(all.contains("[redacted]"), "{all}");
+        assert!(!all.contains("env-secret"), "{all}");
+        assert!(!all.contains("tools-secret"), "{all}");
+        assert!(!all.contains("agents-secret"), "{all}");
+    }
+}
+
+#[test]
+fn openclaw_config_warning_banner_shows_backend_warning_copy() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawEnv;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.config.openclaw_warnings = Some(vec![crate::openclaw_config::OpenClawHealthWarning {
+        code: "stringified_env_vars".to_string(),
+        message: "backend warning copy from scanner".to_string(),
+        path: Some("env.vars".to_string()),
+    }]);
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains(texts::tui_openclaw_config_warning_title()));
+    assert!(all.contains("backend warning copy from scanner"));
+    assert!(all.contains("env.vars"));
+}
+
+#[test]
+fn openclaw_config_warning_banner_hides_when_health_scan_is_clean() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ConfigOpenClawTools;
+    app.focus = Focus::Content;
+
+    let data = minimal_data(&app.app_type);
+    let all = all_text(&render(&app, &data));
+
+    assert!(!all.contains(texts::tui_openclaw_config_warning_title()));
+}
+
+#[test]
+fn openclaw_config_warning_global_banner_is_visible_on_all_subroutes() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    for route in [
+        Route::ConfigOpenClawEnv,
+        Route::ConfigOpenClawTools,
+        Route::ConfigOpenClawAgents,
+    ] {
+        let config_path = "/tmp/openclaw/openclaw.json";
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = route;
+        app.focus = Focus::Content;
+
+        let mut data = minimal_data(&app.app_type);
+        data.config.openclaw_config_path = Some(std::path::PathBuf::from(config_path));
+        data.config.openclaw_warnings = Some(vec![crate::openclaw_config::OpenClawHealthWarning {
+            code: "config_parse_failed".to_string(),
+            message: "OpenClaw config could not be parsed as JSON5: trailing comma".to_string(),
+            path: Some(config_path.to_string()),
+        }]);
+
+        let all = all_text(&render(&app, &data));
+
+        assert!(all.contains(texts::tui_openclaw_config_warning_title()));
+        assert!(all.contains("OpenClaw config could not be parsed as JSON5"));
+        assert!(all.contains(config_path));
+    }
+}
+
+#[test]
+fn openclaw_config_item_and_route_titles_follow_i18n_texts() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut config_app = App::new(Some(AppType::OpenClaw));
+    config_app.route = Route::Config;
+    config_app.focus = Focus::Content;
+    config_app.filter.buffer = "openclaw".to_string();
+    let config_labels = super::config_items_filtered(&config_app)
+        .into_iter()
+        .map(|item| super::config_item_label(&item))
+        .collect::<Vec<_>>();
+
+    assert!(config_labels.contains(&texts::tui_config_item_openclaw_env()));
+    assert!(config_labels.contains(&texts::tui_config_item_openclaw_tools()));
+    assert!(config_labels.contains(&texts::tui_config_item_openclaw_agents_defaults()));
+    assert!(!config_labels.contains(&"OpenClaw Env"));
+    assert!(!config_labels.contains(&"OpenClaw Tools"));
+
+    let mut route_app = App::new(Some(AppType::OpenClaw));
+    route_app.route = Route::ConfigOpenClawAgents;
+    route_app.focus = Focus::Content;
+    assert_eq!(
+        ConfigItem::OpenClawAgents.detail_title(),
+        Some(texts::tui_openclaw_config_agents_title())
+    );
+    assert_ne!(
+        ConfigItem::OpenClawAgents.detail_title(),
+        Some("OpenClaw Agents Defaults")
+    );
+}
+
+#[test]
 fn provider_form_model_field_enter_hint_uses_fetch_model() {
     let keys =
         super::add_form_key_items(FormFocus::Fields, false, Some(ProviderAddField::CodexModel));
@@ -2481,6 +2747,420 @@ fn provider_detail_key_bar_shows_stream_check_hint() {
     }
 
     assert!(all.contains("stream check"));
+}
+
+#[test]
+fn openclaw_provider_list_key_bar_hides_stream_check_hint() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let data = minimal_data(&app.app_type);
+
+    let buf = render(&app, &data);
+    let mut all = String::new();
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            all.push_str(buf[(x, y)].symbol());
+        }
+        all.push('\n');
+    }
+
+    assert!(all.contains("speedtest"));
+    assert!(!all.contains("stream check"));
+}
+
+#[test]
+fn openclaw_provider_list_key_bar_uses_additive_mode_actions() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    let data = minimal_data(&app.app_type);
+
+    let buf = render(&app, &data);
+    let mut all = String::new();
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            all.push_str(buf[(x, y)].symbol());
+        }
+        all.push('\n');
+    }
+
+    assert!(all.contains("s add/remove"));
+    assert!(all.contains("x set default"));
+    assert!(!all.contains("s switch"));
+}
+
+#[test]
+fn openclaw_provider_detail_key_bar_hides_stream_check_hint() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ProviderDetail {
+        id: "p1".to_string(),
+    };
+    app.focus = Focus::Content;
+    let data = minimal_data(&app.app_type);
+
+    let buf = render(&app, &data);
+    let mut all = String::new();
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            all.push_str(buf[(x, y)].symbol());
+        }
+        all.push('\n');
+    }
+
+    assert!(all.contains("speedtest"));
+    assert!(!all.contains("stream check"));
+}
+
+#[test]
+fn openclaw_provider_detail_key_bar_uses_additive_mode_actions() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ProviderDetail {
+        id: "p1".to_string(),
+    };
+    app.focus = Focus::Content;
+    let data = minimal_data(&app.app_type);
+
+    let buf = render(&app, &data);
+    let mut all = String::new();
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            all.push_str(buf[(x, y)].symbol());
+        }
+        all.push('\n');
+    }
+
+    assert!(all.contains("s add/remove"));
+    assert!(all.contains("x set default"));
+    assert!(!all.contains("s switch"));
+}
+
+#[test]
+fn openclaw_provider_list_key_bar_shows_edit_for_tracked_provider() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+
+    let buf = render(&app, &minimal_data(&app.app_type));
+    let all = all_text(&buf);
+
+    assert!(all.contains("e edit"), "{all}");
+    assert!(all.contains("x set default"), "{all}");
+}
+
+#[test]
+fn openclaw_provider_detail_key_bar_shows_edit_for_tracked_provider() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ProviderDetail {
+        id: "p1".to_string(),
+    };
+    app.focus = Focus::Content;
+
+    let buf = render(&app, &minimal_data(&app.app_type));
+    let all = all_text(&buf);
+
+    assert!(all.contains("e edit"), "{all}");
+    assert!(all.contains("x set default"), "{all}");
+}
+
+#[test]
+fn openclaw_provider_detail_shows_actual_default_model_id() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ProviderDetail {
+        id: "p1".to_string(),
+    };
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].is_default_model = true;
+    data.providers.rows[0].primary_model_id = Some("primary-model".to_string());
+    data.providers.rows[0].default_model_id = Some("fallback-model".to_string());
+
+    let buf = render(&app, &data);
+    let mut all = String::new();
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            all.push_str(buf[(x, y)].symbol());
+        }
+        all.push('\n');
+    }
+
+    assert!(all.contains("fallback-model"));
+    assert!(!all.contains("Model: primary-model"));
+}
+
+#[test]
+fn openclaw_tui_provider_list_uses_saved_name_not_model_name() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].provider = Provider::with_id(
+        "p1".to_string(),
+        "Saved Snapshot Name".to_string(),
+        json!({
+            "api": "openai-completions",
+            "models": [
+                {"id": "live-model", "name": "Live Model Name"}
+            ]
+        }),
+        None,
+    );
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains("Saved Snapshot Name"), "{all}");
+    assert!(!all.contains("Live Model Name"), "{all}");
+}
+
+#[test]
+fn openclaw_tui_provider_detail_uses_saved_name_and_keeps_model_separate() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ProviderDetail {
+        id: "p1".to_string(),
+    };
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].provider = Provider::with_id(
+        "p1".to_string(),
+        "Saved Snapshot Name".to_string(),
+        json!({
+            "api": "openai-completions",
+            "models": [
+                {"id": "live-model", "name": "Live Model Name"}
+            ]
+        }),
+        None,
+    );
+    data.providers.rows[0].primary_model_id = Some("live-model".to_string());
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(all.contains("Saved Snapshot Name"), "{all}");
+    assert!(all.contains("live-model"), "{all}");
+    assert!(!all.contains("Name: Live Model Name"), "{all}");
+}
+
+#[test]
+fn openclaw_tui_provider_search_uses_saved_name_not_model_name() {
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.filter.buffer = "live model".to_string();
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].provider = Provider::with_id(
+        "p1".to_string(),
+        "Saved Snapshot Name".to_string(),
+        json!({
+            "api": "openai-completions",
+            "models": [
+                {"id": "live-model", "name": "Live Model Name"}
+            ]
+        }),
+        None,
+    );
+
+    assert!(super::provider_rows_filtered(&app, &data).is_empty());
+
+    app.filter.buffer = "saved snapshot".to_string();
+    assert_eq!(super::provider_rows_filtered(&app, &data).len(), 1);
+}
+
+#[test]
+fn openclaw_provider_detail_localizes_status_copy_in_chinese() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ProviderDetail {
+        id: "p1".to_string(),
+    };
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].is_default_model = true;
+    data.providers.rows[0].default_model_id = Some("fallback-model".to_string());
+
+    let all = all_text(&render(&app, &data));
+    let compact = all.replace(' ', "");
+
+    assert!(compact.contains("状态:默认"), "{all}");
+    assert!(compact.contains("模型:fallback-model"), "{all}");
+    assert!(!all.contains("Status"), "{all}");
+    assert!(!all.contains("Model:"), "{all}");
+}
+
+#[test]
+fn openclaw_provider_detail_localizes_tracked_status_in_chinese() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ProviderDetail {
+        id: "p1".to_string(),
+    };
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].is_default_model = false;
+    data.providers.rows[0].is_in_config = true;
+    data.providers.rows[0].is_saved = true;
+
+    let all = all_text(&render(&app, &data));
+    let compact = all.replace(' ', "");
+
+    assert!(compact.contains("状态:配置中+已保存"), "{all}");
+    assert!(!all.contains("Status"), "{all}");
+}
+
+#[test]
+fn openclaw_provider_detail_treats_live_only_status_as_tracked_copy() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ProviderDetail {
+        id: "p1".to_string(),
+    };
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].is_default_model = false;
+    data.providers.rows[0].is_in_config = true;
+    data.providers.rows[0].is_saved = false;
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(
+        all.contains(texts::tui_openclaw_status_in_config_and_saved()),
+        "{all}"
+    );
+    assert!(
+        !all.contains(texts::tui_openclaw_status_live_only()),
+        "{all}"
+    );
+}
+
+#[test]
+fn openclaw_provider_detail_reports_saved_only_status_truthfully() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ProviderDetail {
+        id: "p1".to_string(),
+    };
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].is_default_model = false;
+    data.providers.rows[0].is_in_config = false;
+    data.providers.rows[0].is_saved = true;
+
+    let all = all_text(&render(&app, &data));
+
+    assert!(
+        all.contains(texts::tui_openclaw_status_saved_only()),
+        "{all}"
+    );
+    assert!(
+        !all.contains(texts::tui_openclaw_status_in_config_and_saved()),
+        "{all}"
+    );
+}
+
+#[test]
+fn openclaw_provider_list_treats_live_only_marker_as_tracked_marker() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+
+    let mut data = minimal_data(&app.app_type);
+    data.providers.rows[0].is_default_model = false;
+    data.providers.rows[0].is_in_config = true;
+    data.providers.rows[0].is_saved = false;
+
+    let buf = render(&app, &data);
+    let provider_line = (0..buf.area.height)
+        .map(|y| line_at(&buf, y))
+        .find(|line| line.contains("Demo Provider"))
+        .expect("provider row rendered");
+
+    assert!(provider_line.contains("+"), "{provider_line}");
+    assert!(!provider_line.contains("~"), "{provider_line}");
+}
+
+#[test]
+fn openclaw_provider_list_key_bar_localizes_actions_in_chinese() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+    let compact = all.replace(' ', "");
+
+    assert!(compact.contains("s添加/移除"), "{all}");
+    assert!(compact.contains("x设为默认"), "{all}");
+    assert!(!all.contains("add/remove"), "{all}");
+    assert!(!all.contains("set default"), "{all}");
+}
+
+#[test]
+fn openclaw_provider_detail_key_bar_localizes_actions_in_chinese() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::Chinese);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::OpenClaw));
+    app.route = Route::ProviderDetail {
+        id: "p1".to_string(),
+    };
+    app.focus = Focus::Content;
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+    let compact = all.replace(' ', "");
+
+    assert!(compact.contains("s添加/移除"), "{all}");
+    assert!(compact.contains("x设为默认"), "{all}");
+    assert!(!all.contains("add/remove"), "{all}");
+    assert!(!all.contains("set default"), "{all}");
 }
 
 #[test]

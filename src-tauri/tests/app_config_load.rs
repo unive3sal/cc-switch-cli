@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use cc_switch_lib::{AppError, MultiAppConfig};
+use cc_switch_lib::{update_settings, AppError, AppSettings, MultiAppConfig};
 
 mod support;
 use support::{ensure_test_home, lock_test_mutex, reset_test_fs};
@@ -104,4 +104,41 @@ fn load_valid_v2_config_succeeds() {
         .get_manager(&cc_switch_lib::AppType::Claude)
         .is_some());
     assert!(loaded.get_manager(&cc_switch_lib::AppType::Codex).is_some());
+    assert!(loaded
+        .get_manager(&cc_switch_lib::AppType::OpenClaw)
+        .is_some());
+}
+
+#[test]
+fn default_config_contains_openclaw_prompt_root_and_manager() {
+    let config = MultiAppConfig::default();
+
+    assert!(config
+        .get_manager(&cc_switch_lib::AppType::OpenClaw)
+        .is_some());
+    assert!(
+        config.prompts.openclaw.prompts.is_empty(),
+        "default OpenClaw prompt store should exist"
+    );
+}
+
+#[test]
+fn update_settings_persists_openclaw_override_dir() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let mut settings = AppSettings::default();
+    settings.openclaw_config_dir = Some("~/custom-openclaw".to_string());
+    update_settings(settings).expect("save settings with openclaw override");
+
+    let path = home.join(".cc-switch").join("settings.json");
+    let raw = fs::read_to_string(&path).expect("read settings.json");
+    let value: serde_json::Value = serde_json::from_str(&raw).expect("parse settings.json");
+    assert_eq!(
+        value
+            .get("openclawConfigDir")
+            .and_then(|entry| entry.as_str()),
+        Some("~/custom-openclaw")
+    );
 }

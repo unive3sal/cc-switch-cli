@@ -4,6 +4,14 @@ fn claude_api_format_label(api_format: crate::cli::tui::form::ClaudeApiFormat) -
     texts::tui_claude_api_format_value(api_format.as_str()).to_string()
 }
 
+fn should_redact_provider_field(
+    provider: &super::form::ProviderAddFormState,
+    field: ProviderAddField,
+) -> bool {
+    matches!(provider.app_type, AppType::OpenClaw)
+        && matches!(field, ProviderAddField::OpenCodeApiKey)
+}
+
 pub(crate) fn render_provider_add_form(
     frame: &mut Frame<'_>,
     app: &App,
@@ -190,17 +198,25 @@ pub(crate) fn render_provider_add_form(
         .copied();
     if let Some(field) = selected {
         if let Some(input) = provider.input(field) {
-            let (visible, cursor_x) =
-                visible_text_window(&input.value, input.cursor, editor_inner.width as usize);
-            frame.render_widget(
-                Paragraph::new(Line::raw(visible)).wrap(Wrap { trim: false }),
-                editor_inner,
-            );
+            if !editor_active && should_redact_provider_field(provider, field) {
+                frame.render_widget(
+                    Paragraph::new(Line::raw(redacted_secret_placeholder()))
+                        .wrap(Wrap { trim: false }),
+                    editor_inner,
+                );
+            } else {
+                let (visible, cursor_x) =
+                    visible_text_window(&input.value, input.cursor, editor_inner.width as usize);
+                frame.render_widget(
+                    Paragraph::new(Line::raw(visible)).wrap(Wrap { trim: false }),
+                    editor_inner,
+                );
 
-            if editor_active {
-                let x = editor_inner.x + cursor_x.min(editor_inner.width.saturating_sub(1));
-                let y = editor_inner.y;
-                frame.set_cursor_position((x, y));
+                if editor_active {
+                    let x = editor_inner.x + cursor_x.min(editor_inner.width.saturating_sub(1));
+                    let y = editor_inner.y;
+                    frame.set_cursor_position((x, y));
+                }
             }
         } else {
             let (line, _cursor_col) =
@@ -279,6 +295,11 @@ pub(crate) fn render_provider_add_form(
             .get("settingsConfig")
             .cloned()
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+        let json_value = if matches!(provider.app_type, AppType::OpenClaw) {
+            redact_sensitive_json(&json_value)
+        } else {
+            json_value
+        };
         let json_text =
             serde_json::to_string_pretty(&json_value).unwrap_or_else(|_| "{}".to_string());
         render_form_json_preview(
@@ -325,7 +346,16 @@ pub(crate) fn provider_field_label_and_value(
         ProviderAddField::GeminiApiKey => texts::tui_label_api_key().to_string(),
         ProviderAddField::GeminiBaseUrl => texts::tui_label_base_url().to_string(),
         ProviderAddField::GeminiModel => texts::model_label().to_string(),
-        ProviderAddField::OpenCodeNpmPackage => texts::tui_label_provider_package().to_string(),
+        ProviderAddField::OpenClawApiProtocol => texts::tui_label_openclaw_api().to_string(),
+        ProviderAddField::OpenClawUserAgent => texts::tui_label_openclaw_user_agent().to_string(),
+        ProviderAddField::OpenClawModels => texts::tui_label_openclaw_models().to_string(),
+        ProviderAddField::OpenCodeNpmPackage => {
+            if provider.app_type == AppType::OpenClaw {
+                texts::tui_label_openclaw_api().to_string()
+            } else {
+                texts::tui_label_provider_package().to_string()
+            }
+        }
         ProviderAddField::OpenCodeApiKey => texts::tui_label_api_key().to_string(),
         ProviderAddField::OpenCodeBaseUrl => texts::tui_label_base_url().to_string(),
         ProviderAddField::OpenCodeModelId => texts::tui_label_opencode_model_id().to_string(),
@@ -361,11 +391,28 @@ pub(crate) fn provider_field_label_and_value(
             GeminiAuthType::OAuth => "oauth".to_string(),
             GeminiAuthType::ApiKey => "api_key".to_string(),
         },
+        ProviderAddField::OpenClawApiProtocol => {
+            provider.opencode_npm_package.value.trim().to_string()
+        }
+        ProviderAddField::OpenClawUserAgent => {
+            if provider.openclaw_user_agent {
+                format!("[{}]", texts::tui_marker_active())
+            } else {
+                "[ ]".to_string()
+            }
+        }
+        ProviderAddField::OpenClawModels => provider.openclaw_models_summary(),
         ProviderAddField::CommonConfigDivider => "- - - - - - - - - -".to_string(),
         ProviderAddField::CommonSnippet => texts::tui_key_open().to_string(),
         _ => provider
             .input(field)
-            .map(|v| v.value.trim().to_string())
+            .map(|v| {
+                if should_redact_provider_field(provider, field) && !v.value.trim().is_empty() {
+                    redacted_secret_placeholder().to_string()
+                } else {
+                    v.value.trim().to_string()
+                }
+            })
             .unwrap_or_default(),
     };
 
@@ -426,6 +473,13 @@ pub(crate) fn provider_field_editor_line(
             ProviderAddField::GeminiAuthType => {
                 format!("auth_type = {}", provider.gemini_auth_type.as_str())
             }
+            ProviderAddField::OpenClawApiProtocol => {
+                format!("api = {}", provider.opencode_npm_package.value.trim())
+            }
+            ProviderAddField::OpenClawUserAgent => {
+                format!("send_user_agent = {}", provider.openclaw_user_agent)
+            }
+            ProviderAddField::OpenClawModels => texts::tui_openclaw_models_open_hint().to_string(),
             _ => String::new(),
         };
         (Line::raw(text), 0)

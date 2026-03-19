@@ -30,6 +30,14 @@ impl StreamCheckService {
                 .and_then(|value| value.as_object())
                 .and_then(|models| models.keys().next().cloned())
                 .unwrap_or_else(|| config.codex_model.clone()),
+            AppType::OpenClaw => provider
+                .settings_config
+                .get("models")
+                .and_then(|value| value.as_array())
+                .and_then(|models| models.first())
+                .and_then(|model| model.get("id").and_then(|value| value.as_str()))
+                .map(str::to_string)
+                .unwrap_or_else(|| config.codex_model.clone()),
         }
     }
 
@@ -160,6 +168,13 @@ impl StreamCheckService {
                 .unwrap_or_default()
                 .trim_end_matches('/')
                 .to_string()),
+            AppType::OpenClaw => Ok(provider
+                .settings_config
+                .get("baseUrl")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .trim_end_matches('/')
+                .to_string()),
         }
     }
 
@@ -199,6 +214,18 @@ impl StreamCheckService {
                 .ok_or_else(|| {
                     AppError::localized(
                         "provider.opencode.api_key.missing",
+                        "缺少 API Key",
+                        "API key is missing",
+                    )
+                }),
+            AppType::OpenClaw => provider
+                .settings_config
+                .get("apiKey")
+                .and_then(|value| value.as_str())
+                .map(|key| AuthInfo::new(key.to_string(), AuthStrategy::Bearer))
+                .ok_or_else(|| {
+                    AppError::localized(
+                        "provider.openclaw.api_key.missing",
                         "缺少 API Key",
                         "API key is missing",
                     )

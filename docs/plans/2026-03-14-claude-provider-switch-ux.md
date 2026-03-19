@@ -102,3 +102,11 @@ Expected: PASS, or identify unrelated failures separately.
 
 Run: `cargo fmt`
 Expected: no diff after formatting.
+
+---
+
+## Execution Status
+
+- 2026-03-18: Merge conflict resolution preserved the Task 1-4 Claude provider switch UX behavior while keeping OpenClaw support in the provider flows.
+- Verified passing during merge resolution with `cargo fmt`, `cargo test cli::tui::runtime_actions::providers --lib`, `cargo test cli::tui::runtime_actions::editor --lib`, `cargo test cli::tui::app::tests --lib`, and `cargo test --test provider_service`.
+- Broader verification completed on 2026-03-18 with `cargo test`; the full Rust test suite passed after fixing the Codex stale-takeover current-provider restore path.

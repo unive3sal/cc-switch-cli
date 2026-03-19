@@ -103,6 +103,10 @@ impl StreamCheckService {
         provider: &Provider,
         config: &StreamCheckConfig,
     ) -> Result<StreamCheckResult, AppError> {
+        if matches!(app_type, AppType::OpenClaw) {
+            return Err(AppError::Message("OpenClaw 暂不支持流式检查".to_string()));
+        }
+
         let start = Instant::now();
         let base_url = Self::extract_base_url(provider, app_type)?;
         let auth = Self::extract_auth(provider, app_type, &base_url)?;
@@ -157,6 +161,7 @@ impl StreamCheckService {
                 )
                 .await
             }
+            AppType::OpenClaw => unreachable!("OpenClaw should return unsupported earlier"),
         };
 
         let response_time = start.elapsed().as_millis() as u64;

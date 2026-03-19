@@ -1040,6 +1040,52 @@ fn provider_add_form_opencode_uses_custom_template_only() {
 }
 
 #[test]
+fn provider_add_form_openclaw_uses_dedicated_template_defs() {
+    let openclaw_defs =
+        super::provider_templates::provider_builtin_template_defs(&AppType::OpenClaw);
+    let opencode_defs =
+        super::provider_templates::provider_builtin_template_defs(&AppType::OpenCode);
+    let openclaw_labels = ProviderAddFormState::new(AppType::OpenClaw).template_labels();
+
+    assert_eq!(openclaw_labels, vec!["Custom"]);
+    assert!(
+        !std::ptr::eq(openclaw_defs, opencode_defs),
+        "OpenClaw should keep its own template mapping instead of aliasing OpenCode"
+    );
+}
+
+#[test]
+fn provider_add_form_openclaw_switching_to_custom_resets_openclaw_specific_fields() {
+    let mut form = ProviderAddFormState::new(AppType::OpenClaw);
+
+    form.id.set("oclaw1");
+    form.name.set("OpenClaw Provider");
+    form.opencode_npm_package.set("anthropic-messages");
+    form.opencode_api_key.set("sk-openclaw");
+    form.opencode_base_url
+        .set("https://api.openclaw.example/v1");
+    form.openclaw_user_agent = true;
+    form.openclaw_models = vec![json!({
+        "id": "primary-model",
+        "name": "Primary Model",
+        "contextWindow": 128000,
+    })];
+
+    form.apply_template(0, &[]);
+
+    assert_eq!(form.id.value, "");
+    assert_eq!(form.name.value, "");
+    assert_eq!(
+        form.opencode_npm_package.value,
+        OPENCLAW_DEFAULT_API_PROTOCOL
+    );
+    assert_eq!(form.opencode_api_key.value, "");
+    assert_eq!(form.opencode_base_url.value, "");
+    assert!(!form.openclaw_user_agent);
+    assert!(form.openclaw_models.is_empty());
+}
+
+#[test]
 fn provider_add_form_opencode_includes_dedicated_fields() {
     let form = ProviderAddFormState::new(AppType::OpenCode);
     let fields = form.fields();
@@ -1144,5 +1190,546 @@ fn provider_add_form_opencode_from_provider_backfills_and_preserves_extra_settin
     assert_eq!(
         roundtrip["settingsConfig"]["models"]["gpt-4.1-mini"]["options"]["reasoningEffort"],
         "medium"
+    );
+}
+
+#[test]
+fn provider_add_form_openclaw_exposes_minimal_dedicated_fields() {
+    let form = ProviderAddFormState::new(AppType::OpenClaw);
+    let fields = form.fields();
+
+    assert_eq!(fields.first(), Some(&ProviderAddField::Id));
+    assert!(fields.contains(&ProviderAddField::OpenClawApiProtocol));
+    assert!(fields.contains(&ProviderAddField::OpenCodeApiKey));
+    assert!(fields.contains(&ProviderAddField::OpenCodeBaseUrl));
+    assert!(fields.contains(&ProviderAddField::OpenClawUserAgent));
+    assert!(fields.contains(&ProviderAddField::OpenClawModels));
+    assert!(
+        !fields.contains(&ProviderAddField::OpenCodeModelOutputLimit),
+        "OpenClaw should not expose the OpenCode-only output limit field"
+    );
+    assert!(
+        !fields.contains(&ProviderAddField::OpenCodeNpmPackage),
+        "OpenClaw should expose a dedicated API protocol picker instead of the OpenCode npm field"
+    );
+    assert!(
+        !fields.contains(&ProviderAddField::OpenCodeModelId),
+        "OpenClaw should use a dedicated models editor instead of a single primary model id field"
+    );
+    assert!(
+        !fields.contains(&ProviderAddField::OpenCodeModelName),
+        "OpenClaw should use a dedicated models editor instead of a single primary model name field"
+    );
+    assert!(
+        !fields.contains(&ProviderAddField::OpenCodeModelContextLimit),
+        "OpenClaw should use a dedicated models editor instead of a single primary context field"
+    );
+    assert!(
+        !fields.contains(&ProviderAddField::CommonConfigDivider),
+        "OpenClaw should not expose the Common Config block"
+    );
+    assert!(
+        !fields.contains(&ProviderAddField::CommonSnippet),
+        "OpenClaw should not expose the Common Config editor"
+    );
+    assert!(
+        !fields.contains(&ProviderAddField::IncludeCommonConfig),
+        "OpenClaw should not expose the Common Config toggle"
+    );
+}
+
+#[test]
+fn provider_edit_form_openclaw_keeps_provider_key_visible_but_locked() {
+    let provider = Provider::with_id(
+        "openclaw-provider".to_string(),
+        "OpenClaw Provider".to_string(),
+        json!({
+            "baseUrl": "https://api.openclaw.example/v1"
+        }),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider(AppType::OpenClaw, &provider);
+
+    assert!(
+        form.fields().contains(&ProviderAddField::Id),
+        "OpenClaw edit form should still show provider key"
+    );
+    assert!(
+        !form.is_id_editable(),
+        "editing an existing OpenClaw provider should keep provider key immutable"
+    );
+}
+
+#[test]
+fn provider_add_form_openclaw_uses_upstream_default_api_protocol() {
+    let mut form = ProviderAddFormState::new(AppType::OpenClaw);
+    form.id.set("oclaw1");
+    form.name.set("OpenClaw Provider");
+    form.opencode_api_key.set("sk-openclaw");
+    form.opencode_base_url
+        .set("https://api.openclaw.example/v1");
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["settingsConfig"]["apiKey"], "sk-openclaw");
+    assert_eq!(
+        provider["settingsConfig"]["baseUrl"],
+        "https://api.openclaw.example/v1"
+    );
+    assert_eq!(provider["settingsConfig"]["api"], "openai-completions");
+}
+
+#[test]
+fn provider_add_form_openclaw_roundtrip_restores_protocol_and_user_agent_toggle() {
+    let provider = Provider::with_id(
+        "oclaw1".to_string(),
+        "OpenClaw Provider".to_string(),
+        json!({
+            "api": "anthropic-messages",
+            "apiKey": "sk-openclaw",
+            "baseUrl": "https://api.openclaw.example/v1",
+            "headers": {
+                "User-Agent": "Mozilla/5.0 custom",
+                "X-Test": "1"
+            },
+            "models": [
+                {
+                    "id": "primary-model",
+                    "name": "Primary Model",
+                    "contextWindow": 128000
+                }
+            ]
+        }),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider(AppType::OpenClaw, &provider);
+    assert_eq!(form.opencode_npm_package.value, "anthropic-messages");
+    assert!(
+        form.openclaw_user_agent,
+        "OpenClaw form should restore the User-Agent toggle from headers"
+    );
+
+    let roundtrip = form.to_provider_json_value();
+    assert_eq!(roundtrip["settingsConfig"]["api"], "anthropic-messages");
+    assert_eq!(
+        roundtrip["settingsConfig"]["headers"]["User-Agent"],
+        "Mozilla/5.0 custom"
+    );
+    assert_eq!(roundtrip["settingsConfig"]["headers"]["X-Test"], "1");
+}
+
+#[test]
+fn provider_add_form_openclaw_enabling_user_agent_adds_default_header() {
+    let mut form = ProviderAddFormState::new(AppType::OpenClaw);
+    form.id.set("oclaw1");
+    form.name.set("OpenClaw Provider");
+    form.openclaw_user_agent = true;
+
+    let provider = form.to_provider_json_value();
+    assert_eq!(provider["settingsConfig"]["api"], "openai-completions");
+    assert_eq!(
+        provider["settingsConfig"]["headers"]["User-Agent"],
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:148.0) Gecko/20100101 Firefox/148.0"
+    );
+}
+
+#[test]
+fn provider_add_form_openclaw_from_provider_preserves_other_models_on_roundtrip() {
+    let provider = Provider::with_id(
+        "oclaw1".to_string(),
+        "OpenClaw Provider".to_string(),
+        json!({
+            "api": "openai-responses",
+            "apiKey": "sk-openclaw",
+            "baseUrl": "https://api.openclaw.example/v1",
+            "headers": {
+                "X-Test": "1"
+            },
+            "models": [
+                {
+                    "id": "primary-model",
+                    "name": "Primary Model",
+                    "contextWindow": 128000,
+                    "providerHint": "reasoning"
+                },
+                {
+                    "id": "fallback-model",
+                    "name": "Fallback Model",
+                    "contextWindow": 64000
+                }
+            ]
+        }),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider(AppType::OpenClaw, &provider);
+    assert_eq!(form.opencode_npm_package.value, "openai-responses");
+    assert_eq!(form.opencode_model_id.value, "primary-model");
+    assert_eq!(form.opencode_model_name.value, "Primary Model");
+    assert_eq!(form.opencode_model_context_limit.value, "128000");
+
+    let roundtrip = form.to_provider_json_value();
+    let models = roundtrip["settingsConfig"]["models"]
+        .as_array()
+        .expect("OpenClaw models should remain an array");
+    assert_eq!(
+        models.len(),
+        2,
+        "editing one model should not drop the others"
+    );
+    assert_eq!(models[1]["id"], "fallback-model");
+    assert_eq!(models[0]["providerHint"], "reasoning");
+    assert_eq!(roundtrip["settingsConfig"]["headers"]["X-Test"], "1");
+}
+
+#[test]
+fn provider_add_form_openclaw_roundtrip_preserves_unknown_model_fields() {
+    let provider = Provider::with_id(
+        "oclaw1".to_string(),
+        "OpenClaw Provider".to_string(),
+        json!({
+            "api": "openai-responses",
+            "models": [
+                {
+                    "id": "gpt-4.1",
+                    "name": "GPT-4.1",
+                    "reasoning": true,
+                    "input": ["text", "image"],
+                    "contextWindow": 128000,
+                    "maxTokens": 8192,
+                    "cost": {
+                        "input": 2.0,
+                        "output": 8.0,
+                        "cacheRead": 1.0,
+                        "cacheWrite": 4.0
+                    }
+                }
+            ]
+        }),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider(AppType::OpenClaw, &provider);
+    let roundtrip = form.to_provider_json_value();
+
+    assert_eq!(roundtrip["settingsConfig"]["models"][0]["reasoning"], true);
+    assert_eq!(
+        roundtrip["settingsConfig"]["models"][0]["input"],
+        json!(["text", "image"])
+    );
+    assert_eq!(roundtrip["settingsConfig"]["models"][0]["maxTokens"], 8192);
+    assert_eq!(
+        roundtrip["settingsConfig"]["models"][0]["cost"]["cacheRead"],
+        1.0
+    );
+    assert_eq!(
+        roundtrip["settingsConfig"]["models"][0]["cost"]["cacheWrite"],
+        4.0
+    );
+}
+
+#[test]
+fn provider_add_form_openclaw_editing_primary_model_keeps_full_models_array_and_unknown_fields() {
+    let provider = Provider::with_id(
+        "oclaw1".to_string(),
+        "OpenClaw Provider".to_string(),
+        json!({
+            "api": "openai-completions",
+            "models": [
+                {
+                    "id": "primary-model",
+                    "name": "Primary Model",
+                    "contextWindow": 128000,
+                    "reasoning": true,
+                    "cost": {
+                        "cacheRead": 1.0,
+                        "cacheWrite": 4.0
+                    }
+                },
+                {
+                    "id": "fallback-model",
+                    "name": "Fallback Model",
+                    "contextWindow": 64000,
+                    "providerHint": "fallback",
+                    "input": ["text"]
+                }
+            ]
+        }),
+        None,
+    );
+
+    let mut form = ProviderAddFormState::from_provider(AppType::OpenClaw, &provider);
+    form.opencode_model_name.set("Primary Model Updated");
+    form.opencode_model_context_limit.set("256000");
+
+    let roundtrip = form.to_provider_json_value();
+    let models = roundtrip["settingsConfig"]["models"]
+        .as_array()
+        .expect("OpenClaw models should remain an array");
+
+    assert_eq!(
+        models.len(),
+        2,
+        "editing the primary model should keep fallbacks"
+    );
+    assert_eq!(models[0]["id"], "primary-model");
+    assert_eq!(models[0]["name"], "Primary Model Updated");
+    assert_eq!(models[0]["contextWindow"], 256000);
+    assert_eq!(models[0]["reasoning"], true);
+    assert_eq!(models[0]["cost"]["cacheRead"], 1.0);
+    assert_eq!(models[0]["cost"]["cacheWrite"], 4.0);
+    assert_eq!(models[1]["id"], "fallback-model");
+    assert_eq!(models[1]["providerHint"], "fallback");
+    assert_eq!(models[1]["input"], json!(["text"]));
+}
+
+#[test]
+fn provider_add_form_openclaw_clearing_model_id_removes_model_instead_of_using_name() {
+    let provider = Provider::with_id(
+        "oclaw1".to_string(),
+        "OpenClaw Provider".to_string(),
+        json!({
+            "api": "openai-completions",
+            "models": [
+                {
+                    "id": "primary-model",
+                    "name": "Primary Model",
+                    "contextWindow": 128000
+                }
+            ]
+        }),
+        None,
+    );
+
+    let mut form = ProviderAddFormState::from_provider(AppType::OpenClaw, &provider);
+    form.opencode_model_id.set("");
+    form.opencode_model_name.set("Display Name Only");
+
+    let roundtrip = form.to_provider_json_value();
+    assert!(
+        roundtrip["settingsConfig"].get("models").is_none(),
+        "OpenClaw should require an explicit model id instead of falling back to the display name"
+    );
+}
+
+#[test]
+fn provider_add_form_openclaw_renaming_primary_model_to_existing_fallback_deduplicates_ids() {
+    let provider = Provider::with_id(
+        "oclaw1".to_string(),
+        "OpenClaw Provider".to_string(),
+        json!({
+            "api": "openai-completions",
+            "models": [
+                {
+                    "id": "primary-model",
+                    "name": "Primary Model",
+                    "contextWindow": 128000,
+                    "providerHint": "reasoning"
+                },
+                {
+                    "id": "fallback-model",
+                    "name": "Fallback Model",
+                    "contextWindow": 64000
+                }
+            ]
+        }),
+        None,
+    );
+
+    let mut form = ProviderAddFormState::from_provider(AppType::OpenClaw, &provider);
+    form.opencode_model_id.set("fallback-model");
+    form.opencode_model_name.set("Merged Primary");
+    form.opencode_model_context_limit.set("256000");
+
+    let roundtrip = form.to_provider_json_value();
+    let models = roundtrip["settingsConfig"]["models"]
+        .as_array()
+        .expect("OpenClaw models should remain an array");
+
+    assert_eq!(
+        models.len(),
+        1,
+        "renaming a model to an existing id should not leave duplicate OpenClaw model ids"
+    );
+    assert_eq!(models[0]["id"], "fallback-model");
+    assert_eq!(models[0]["name"], "Merged Primary");
+    assert_eq!(models[0]["contextWindow"], 256000);
+    assert_eq!(models[0]["providerHint"], "reasoning");
+}
+
+#[test]
+fn provider_add_form_openclaw_ignores_legacy_api_aliases_when_loading() {
+    let provider = Provider::with_id(
+        "oclaw1".to_string(),
+        "OpenClaw Provider".to_string(),
+        json!({
+            "api_key": "sk-legacy-openclaw",
+            "base_url": "https://legacy.openclaw.example/v1",
+            "headers": {
+                "X-Test": "1"
+            }
+        }),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider(AppType::OpenClaw, &provider);
+    assert!(form.opencode_api_key.value.is_empty());
+    assert!(form.opencode_base_url.value.is_empty());
+
+    let roundtrip = form.to_provider_json_value();
+    assert!(roundtrip["settingsConfig"].get("apiKey").is_none());
+    assert!(roundtrip["settingsConfig"].get("baseUrl").is_none());
+    assert!(
+        roundtrip["settingsConfig"].get("api_key").is_none(),
+        "saving OpenClaw providers should not preserve legacy api_key aliases"
+    );
+    assert!(
+        roundtrip["settingsConfig"].get("base_url").is_none(),
+        "saving OpenClaw providers should not preserve legacy base_url aliases"
+    );
+    assert_eq!(roundtrip["settingsConfig"]["headers"]["X-Test"], "1");
+}
+
+#[test]
+fn provider_add_form_openclaw_ignores_legacy_context_window_alias_when_loading() {
+    let provider = Provider::with_id(
+        "oclaw1".to_string(),
+        "OpenClaw Provider".to_string(),
+        json!({
+            "api": "openai-completions",
+            "models": [
+                {
+                    "id": "primary-model",
+                    "name": "Primary Model",
+                    "context_window": 128000,
+                    "providerHint": "reasoning"
+                }
+            ]
+        }),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider(AppType::OpenClaw, &provider);
+    assert_eq!(form.opencode_model_id.value, "primary-model");
+    assert!(form.opencode_model_context_limit.value.is_empty());
+
+    let roundtrip = form.to_provider_json_value();
+    assert!(
+        roundtrip["settingsConfig"]["models"][0]
+            .get("contextWindow")
+            .is_none(),
+        "OpenClaw form should not promote legacy context_window to canonical contextWindow"
+    );
+    assert!(
+        roundtrip["settingsConfig"]["models"][0]
+            .get("context_window")
+            .is_none(),
+        "OpenClaw form should not preserve legacy context_window aliases"
+    );
+    assert_eq!(
+        roundtrip["settingsConfig"]["models"][0]["providerHint"],
+        "reasoning"
+    );
+}
+
+#[test]
+fn provider_add_form_openclaw_does_not_coerce_opencode_models_object_shape() {
+    let provider = Provider::with_id(
+        "oclaw1".to_string(),
+        "OpenClaw Provider".to_string(),
+        json!({
+            "api": "openai-completions",
+            "models": {
+                "gpt-4.1-mini": {
+                    "name": "GPT 4.1 Mini"
+                }
+            }
+        }),
+        None,
+    );
+
+    let form = ProviderAddFormState::from_provider(AppType::OpenClaw, &provider);
+    assert!(form.openclaw_models.is_empty());
+    assert!(form.opencode_model_id.value.is_empty());
+
+    let roundtrip = form.to_provider_json_value();
+    assert!(
+        roundtrip["settingsConfig"].get("models").is_none(),
+        "OpenClaw form JSON should drop additive models objects instead of coercing them into a one-element array"
+    );
+}
+
+#[test]
+fn provider_add_form_openclaw_common_config_does_not_apply_legacy_aliases() {
+    let mut form = ProviderAddFormState::new(AppType::OpenClaw);
+    form.id.set("oclaw1");
+    form.name.set("OpenClaw Provider");
+    form.opencode_api_key.set("sk-provider-openclaw");
+    form.opencode_base_url
+        .set("https://provider.openclaw.example/v1");
+
+    let provider = form
+        .to_provider_json_value_with_common_config(
+            r#"{
+                "api_key": "sk-common-openclaw",
+                "base_url": "https://common.openclaw.example/v1",
+                "headers": {
+                    "X-Common": "1"
+                }
+            }"#,
+        )
+        .expect("OpenClaw common config should be ignored cleanly");
+
+    assert_eq!(provider["settingsConfig"]["apiKey"], "sk-provider-openclaw");
+    assert_eq!(
+        provider["settingsConfig"]["baseUrl"],
+        "https://provider.openclaw.example/v1"
+    );
+    assert!(
+        provider["settingsConfig"].get("api_key").is_none(),
+        "ignored OpenClaw common config should not reintroduce api_key"
+    );
+    assert!(
+        provider["settingsConfig"].get("base_url").is_none(),
+        "ignored OpenClaw common config should not reintroduce base_url"
+    );
+    assert!(
+        provider["settingsConfig"].get("headers").is_none(),
+        "ignored OpenClaw common config should not inject headers"
+    );
+}
+
+#[test]
+fn provider_add_form_openclaw_ignores_common_config_snippet() {
+    let mut form = ProviderAddFormState::new(AppType::OpenClaw);
+    form.id.set("oclaw1");
+    form.name.set("OpenClaw Provider");
+    form.opencode_base_url
+        .set("https://provider.openclaw.example/v1");
+
+    assert!(
+        !form.include_common_config,
+        "OpenClaw should default to not attaching Common Config"
+    );
+
+    let provider = form
+        .to_provider_json_value_with_common_config(
+            r#"{
+                "baseUrl": "https://common.openclaw.example/v1",
+                "headers": {
+                    "X-Common": "1"
+                }
+            }"#,
+        )
+        .expect("OpenClaw common config should be ignored cleanly");
+
+    assert_eq!(
+        provider["settingsConfig"]["baseUrl"],
+        "https://provider.openclaw.example/v1"
+    );
+    assert!(
+        provider["settingsConfig"].get("headers").is_none(),
+        "OpenClaw should not inherit Common Config headers"
     );
 }

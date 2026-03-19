@@ -2,7 +2,7 @@ use super::*;
 
 impl App {
     pub(crate) fn on_providers_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
-        let visible = visible_providers(&self.filter, data);
+        let visible = visible_providers(&self.app_type, &self.filter, data);
         match key.code {
             KeyCode::Up => {
                 self.provider_idx = self.provider_idx.saturating_sub(1);
@@ -35,11 +35,51 @@ impl App {
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
                 };
+                if matches!(self.app_type, AppType::OpenClaw) {
+                    if row.is_in_config {
+                        if row.default_model_id.is_some() {
+                            self.push_toast(
+                                texts::tui_toast_provider_cannot_remove_default_model(),
+                                ToastKind::Warning,
+                            );
+                            return Action::None;
+                        }
+                        return Action::ProviderRemoveFromConfig { id: row.id.clone() };
+                    }
+
+                    return Action::ProviderSwitch { id: row.id.clone() };
+                }
                 if row.is_current {
                     self.push_toast(texts::tui_toast_provider_already_in_use(), ToastKind::Info);
                     return Action::None;
                 }
                 Action::ProviderSwitch { id: row.id.clone() }
+            }
+            KeyCode::Char('x') => {
+                let Some(row) = visible.get(self.provider_idx) else {
+                    return Action::None;
+                };
+                if !matches!(self.app_type, AppType::OpenClaw) {
+                    return Action::None;
+                }
+                if !row.is_in_config {
+                    self.push_toast(
+                        texts::tui_toast_provider_default_requires_live_config(),
+                        ToastKind::Warning,
+                    );
+                    return Action::None;
+                }
+                let Some(model_id) = row.primary_model_id.clone() else {
+                    self.push_toast(
+                        texts::tui_toast_provider_default_model_missing(),
+                        ToastKind::Warning,
+                    );
+                    return Action::None;
+                };
+                Action::ProviderSetDefaultModel {
+                    provider_id: row.id.clone(),
+                    model_id,
+                }
             }
             KeyCode::Char('d') => {
                 let Some(row) = visible.get(self.provider_idx) else {
@@ -55,7 +95,7 @@ impl App {
                 self.overlay = Overlay::Confirm(ConfirmOverlay {
                     title: texts::tui_confirm_delete_provider_title().to_string(),
                     message: texts::tui_confirm_delete_provider_message(
-                        &row.provider.name,
+                        &super::data::provider_display_name(&self.app_type, row),
                         &row.id,
                     ),
                     action: ConfirmAction::ProviderDelete { id: row.id.clone() },
@@ -74,12 +114,15 @@ impl App {
                 Action::ProviderSpeedtest { url }
             }
             KeyCode::Char('c') => {
+                if !supports_provider_stream_check(&self.app_type) {
+                    return Action::None;
+                }
                 let Some(row) = visible.get(self.provider_idx) else {
                     return Action::None;
                 };
                 self.overlay = Overlay::StreamCheckRunning {
                     provider_id: row.id.clone(),
-                    provider_name: row.provider.name.clone(),
+                    provider_name: super::data::provider_display_name(&self.app_type, row),
                 };
                 Action::ProviderStreamCheck { id: row.id.clone() }
             }
@@ -104,11 +147,48 @@ impl App {
             }
             KeyCode::Enter => Action::None,
             KeyCode::Char('s') => {
+                if matches!(self.app_type, AppType::OpenClaw) {
+                    if row.is_in_config {
+                        if row.default_model_id.is_some() {
+                            self.push_toast(
+                                texts::tui_toast_provider_cannot_remove_default_model(),
+                                ToastKind::Warning,
+                            );
+                            return Action::None;
+                        }
+                        return Action::ProviderRemoveFromConfig { id: row.id.clone() };
+                    }
+
+                    return Action::ProviderSwitch { id: row.id.clone() };
+                }
                 if row.is_current {
                     self.push_toast(texts::tui_toast_provider_already_in_use(), ToastKind::Info);
                     return Action::None;
                 }
                 Action::ProviderSwitch { id: row.id.clone() }
+            }
+            KeyCode::Char('x') => {
+                if !matches!(self.app_type, AppType::OpenClaw) {
+                    return Action::None;
+                }
+                if !row.is_in_config {
+                    self.push_toast(
+                        texts::tui_toast_provider_default_requires_live_config(),
+                        ToastKind::Warning,
+                    );
+                    return Action::None;
+                }
+                let Some(model_id) = row.primary_model_id.clone() else {
+                    self.push_toast(
+                        texts::tui_toast_provider_default_model_missing(),
+                        ToastKind::Warning,
+                    );
+                    return Action::None;
+                };
+                Action::ProviderSetDefaultModel {
+                    provider_id: row.id.clone(),
+                    model_id,
+                }
             }
             KeyCode::Char('t') => {
                 let Some(url) = row.api_url.clone() else {
@@ -119,9 +199,12 @@ impl App {
                 Action::ProviderSpeedtest { url }
             }
             KeyCode::Char('c') => {
+                if !supports_provider_stream_check(&self.app_type) {
+                    return Action::None;
+                }
                 self.overlay = Overlay::StreamCheckRunning {
                     provider_id: row.id.clone(),
-                    provider_name: row.provider.name.clone(),
+                    provider_name: super::data::provider_display_name(&self.app_type, row),
                 };
                 Action::ProviderStreamCheck { id: row.id.clone() }
             }

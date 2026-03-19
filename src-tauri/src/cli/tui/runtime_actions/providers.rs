@@ -5,8 +5,10 @@ use crate::cli::tui::form::ClaudeApiFormat;
 use crate::codex_config::{get_codex_auth_path, get_codex_config_path};
 use crate::config::get_claude_settings_path;
 use crate::error::AppError;
+use crate::openclaw_config::OpenClawDefaultModel;
 use crate::proxy::providers::get_claude_api_format;
 use crate::services::ProviderService;
+use serde_json::Value;
 
 use super::super::app::{ConfirmAction, ConfirmOverlay, Overlay, ToastKind};
 use super::super::data::{load_state, UiData};
@@ -267,7 +269,7 @@ fn current_timestamp() -> i64 {
 
 fn display_path_with_tilde(path: &Path) -> String {
     let display = path.display().to_string();
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = crate::config::home_dir() else {
         return display;
     };
     let home = home.display().to_string();
@@ -311,6 +313,110 @@ pub(super) fn delete(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(
     Ok(())
 }
 
+pub(super) fn remove_from_config(
+    ctx: &mut RuntimeActionContext<'_>,
+    id: String,
+) -> Result<(), AppError> {
+    match ctx.app.app_type {
+        crate::app_config::AppType::OpenClaw => {
+            if openclaw_default_model_references_provider(&id)? {
+                return Err(AppError::localized(
+                    "provider.remove_from_config.openclaw_default",
+                    "不能从配置中移除被当前默认模型引用的 OpenClaw 供应商",
+                    "Cannot remove the OpenClaw provider referenced by the current default model from config",
+                ));
+            }
+            crate::openclaw_config::remove_provider(&id)?;
+            ctx.app.push_toast(
+                texts::tui_toast_provider_removed_from_config(),
+                ToastKind::Success,
+            );
+            *ctx.data = UiData::load(&ctx.app.app_type)?;
+            Ok(())
+        }
+        _ => delete(ctx, id),
+    }
+}
+
+pub(super) fn set_default_model(
+    ctx: &mut RuntimeActionContext<'_>,
+    provider_id: String,
+    model_id: String,
+) -> Result<(), AppError> {
+    if !matches!(ctx.app.app_type, crate::app_config::AppType::OpenClaw) {
+        return Ok(());
+    }
+
+    let live_provider = openclaw_live_provider_value(&provider_id)?;
+    let ordered_model_ids = openclaw_provider_model_ids(&live_provider);
+    if ordered_model_ids.is_empty() {
+        return Err(AppError::localized(
+            "provider.set_default_model.openclaw_no_models",
+            "该 OpenClaw 供应商在当前配置中没有可用模型",
+            "This OpenClaw provider has no models in the current config",
+        ));
+    }
+
+    // OpenClaw default-setting follows the live provider order from openclaw.json,
+    // so stale TUI snapshots cannot override the current primary model.
+    let model_id = ordered_model_ids.first().cloned().unwrap_or(model_id);
+
+    let primary = format!("{provider_id}/{model_id}");
+    let fallbacks = ordered_model_ids
+        .iter()
+        .filter(|candidate| *candidate != &model_id)
+        .map(|candidate| format!("{provider_id}/{candidate}"))
+        .collect();
+    let model = OpenClawDefaultModel {
+        primary: primary.clone(),
+        fallbacks,
+        extra: crate::openclaw_config::get_default_model()?
+            .map(|existing| existing.extra)
+            .unwrap_or_default(),
+    };
+    crate::openclaw_config::set_default_model(&model)?;
+    ctx.app.push_toast(
+        texts::tui_toast_provider_set_as_default(&primary),
+        ToastKind::Success,
+    );
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    Ok(())
+}
+
+fn openclaw_default_model_references_provider(provider_id: &str) -> Result<bool, AppError> {
+    Ok(
+        crate::openclaw_config::get_default_model()?.is_some_and(|model| {
+            std::iter::once(model.primary.as_str())
+                .chain(model.fallbacks.iter().map(String::as_str))
+                .filter_map(|model_ref| model_ref.split_once('/'))
+                .any(|(default_provider_id, _)| default_provider_id == provider_id)
+        }),
+    )
+}
+
+fn openclaw_live_provider_value(provider_id: &str) -> Result<Value, AppError> {
+    crate::openclaw_config::get_providers()?
+        .remove(provider_id)
+        .ok_or_else(|| {
+            AppError::localized(
+                "provider.set_default_model.openclaw_provider_missing",
+                format!("请先将该 OpenClaw 供应商加入当前配置: {provider_id}"),
+                format!("Add this OpenClaw provider to the current config first: {provider_id}"),
+            )
+        })
+}
+
+fn openclaw_provider_model_ids(provider_value: &Value) -> Vec<String> {
+    provider_value
+        .get("models")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|model| model.get("id").and_then(|value| value.as_str()))
+        .map(str::to_string)
+        .collect()
+}
+
 pub(super) fn speedtest(ctx: &mut RuntimeActionContext<'_>, url: String) -> Result<(), AppError> {
     let Some(tx) = ctx.speedtest_req_tx else {
         if matches!(&ctx.app.overlay, Overlay::SpeedtestRunning { url: running_url } if running_url == &url)
@@ -352,7 +458,7 @@ pub(super) fn stream_check(ctx: &mut RuntimeActionContext<'_>, id: String) -> Re
     let req = StreamCheckReq {
         app_type: ctx.app.app_type.clone(),
         provider_id: row.id.clone(),
-        provider_name: row.provider.name.clone(),
+        provider_name: crate::cli::tui::data::provider_display_name(&ctx.app.app_type, row),
         provider: row.provider.clone(),
     };
 
@@ -417,6 +523,7 @@ pub(super) fn model_fetch(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::ffi::OsString;
     use std::path::Path;
 
@@ -430,20 +537,29 @@ mod tests {
     use crate::cli::tui::runtime_systems::RequestTracker;
     use crate::cli::tui::terminal::TuiTerminal;
     use crate::provider::Provider;
+    use crate::settings::{get_settings, update_settings, AppSettings};
+    use crate::test_support::{
+        lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
+    };
     use crate::{AppType, MultiAppConfig};
 
     struct EnvGuard {
+        _lock: TestHomeSettingsLock,
         old_home: Option<OsString>,
         old_userprofile: Option<OsString>,
     }
 
     impl EnvGuard {
         fn set_home(home: &Path) -> Self {
+            let lock = lock_test_home_and_settings();
             let old_home = std::env::var_os("HOME");
             let old_userprofile = std::env::var_os("USERPROFILE");
             std::env::set_var("HOME", home);
             std::env::set_var("USERPROFILE", home);
+            set_test_home_override(Some(home));
+            crate::settings::reload_test_settings();
             Self {
+                _lock: lock,
                 old_home,
                 old_userprofile,
             }
@@ -460,6 +576,28 @@ mod tests {
                 Some(value) => std::env::set_var("USERPROFILE", value),
                 None => std::env::remove_var("USERPROFILE"),
             }
+            set_test_home_override(self.old_home.as_deref().map(Path::new));
+            crate::settings::reload_test_settings();
+        }
+    }
+
+    struct SettingsGuard {
+        previous: AppSettings,
+    }
+
+    impl SettingsGuard {
+        fn with_openclaw_dir(path: &Path) -> Self {
+            let previous = get_settings();
+            let mut settings = AppSettings::default();
+            settings.openclaw_config_dir = Some(path.display().to_string());
+            update_settings(settings).expect("set openclaw override dir");
+            Self { previous }
+        }
+    }
+
+    impl Drop for SettingsGuard {
+        fn drop(&mut self) {
+            update_settings(self.previous.clone()).expect("restore previous settings");
         }
     }
 
@@ -577,14 +715,21 @@ mod tests {
         )
     }
 
+    struct SwitchFixture {
+        _temp_home: TempDir,
+        _env: EnvGuard,
+        app: App,
+        data: UiData,
+    }
+
     fn run_codex_switch(
         current_id: &str,
         config_text: Option<&str>,
         auth: Option<serde_json::Value>,
         shared_tip_shown: bool,
-    ) -> Result<(App, UiData), AppError> {
+    ) -> Result<SwitchFixture, AppError> {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let env = EnvGuard::set_home(temp_home.path());
 
         let mut settings = crate::settings::get_settings();
         settings.provider_switch_common_config_tip_shown_codex = shared_tip_shown;
@@ -619,7 +764,12 @@ mod tests {
 
         switch(&mut ctx, "new-provider".to_string())?;
 
-        Ok((app, data))
+        Ok(SwitchFixture {
+            _temp_home: temp_home,
+            _env: env,
+            app,
+            data,
+        })
     }
 
     fn seed_claude_live_settings(value: serde_json::Value) -> Result<(), AppError> {
@@ -640,9 +790,9 @@ mod tests {
         api_format: &str,
         seed_live: bool,
         shared_tip_shown: bool,
-    ) -> Result<(App, UiData), AppError> {
+    ) -> Result<SwitchFixture, AppError> {
         let temp_home = TempDir::new().expect("create temp home");
-        let _env = EnvGuard::set_home(temp_home.path());
+        let env = EnvGuard::set_home(temp_home.path());
 
         let mut settings = crate::settings::get_settings();
         settings.provider_switch_common_config_tip_shown = shared_tip_shown;
@@ -686,13 +836,18 @@ mod tests {
 
         switch(&mut ctx, "proxy-provider".to_string())?;
 
-        Ok((app, data))
+        Ok(SwitchFixture {
+            _temp_home: temp_home,
+            _env: env,
+            app,
+            data,
+        })
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_does_not_show_restart_toast_when_live_sync_succeeds() {
-        let (app, data) = run_codex_switch(
+        let fixture = run_codex_switch(
             "old-provider",
             Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
             Some(json!({"OPENAI_API_KEY": "legacy-key"})),
@@ -700,30 +855,30 @@ mod tests {
         )
         .expect("switch should succeed");
 
-        assert_eq!(data.providers.current_id, "new-provider");
+        assert_eq!(fixture.data.providers.current_id, "new-provider");
         assert!(
-            app.toast.is_none(),
+            fixture.app.toast.is_none(),
             "provider switch should not show restart toast"
         );
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_does_not_show_restart_toast_when_live_sync_is_skipped() {
-        let (app, data) =
+        let fixture =
             run_codex_switch("old-provider", None, None, true).expect("switch should succeed");
 
-        assert_eq!(data.providers.current_id, "new-provider");
+        assert_eq!(fixture.data.providers.current_id, "new-provider");
         assert!(
-            app.toast.is_none(),
+            fixture.app.toast.is_none(),
             "provider switch should not show restart toast"
         );
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_shows_first_use_guard_before_overwriting_existing_codex_settings() {
-        let (app, data) = run_codex_switch(
+        let fixture = run_codex_switch(
             "",
             Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
             None,
@@ -731,9 +886,9 @@ mod tests {
         )
         .expect("guarded switch should succeed");
 
-        assert_eq!(data.providers.current_id, "");
+        assert_eq!(fixture.data.providers.current_id, "");
         assert!(matches!(
-            app.overlay,
+            fixture.app.overlay,
             Overlay::ProviderSwitchFirstUseConfirm {
                 provider_id,
                 title,
@@ -747,18 +902,18 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_first_use_without_existing_codex_settings_switches_normally() {
-        let (app, data) = run_codex_switch("", None, None, false).expect("switch should succeed");
+        let fixture = run_codex_switch("", None, None, false).expect("switch should succeed");
 
-        assert_eq!(data.providers.current_id, "new-provider");
-        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(fixture.data.providers.current_id, "new-provider");
+        assert!(matches!(fixture.app.overlay, Overlay::None));
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_codex_auth_only_state_does_not_trigger_first_use_guard() {
-        let (app, data) = run_codex_switch(
+        let fixture = run_codex_switch(
             "",
             None,
             Some(json!({"OPENAI_API_KEY": "legacy-key"})),
@@ -766,14 +921,14 @@ mod tests {
         )
         .expect("switch should succeed");
 
-        assert_eq!(data.providers.current_id, "new-provider");
-        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(fixture.data.providers.current_id, "new-provider");
+        assert!(matches!(fixture.app.overlay, Overlay::None));
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_existing_codex_install_with_current_provider_skips_first_use_guard() {
-        let (app, data) = run_codex_switch(
+        let fixture = run_codex_switch(
             "old-provider",
             Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
             None,
@@ -781,12 +936,12 @@ mod tests {
         )
         .expect("switch should succeed");
 
-        assert_eq!(data.providers.current_id, "new-provider");
-        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(fixture.data.providers.current_id, "new-provider");
+        assert!(matches!(fixture.app.overlay, Overlay::None));
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_import_codex_live_config_succeeds_without_auth_json() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());
@@ -838,9 +993,9 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn codex_provider_switch_shows_one_time_shared_config_tip_after_first_real_switch() {
-        let (app, data) = run_codex_switch(
+        let fixture = run_codex_switch(
             "old-provider",
             Some("model_provider = \"legacy\"\nmodel = \"gpt-4\"\n"),
             Some(json!({"OPENAI_API_KEY": "legacy-key"})),
@@ -848,9 +1003,9 @@ mod tests {
         )
         .expect("switch should succeed");
 
-        assert_eq!(data.providers.current_id, "new-provider");
+        assert_eq!(fixture.data.providers.current_id, "new-provider");
         assert!(matches!(
-            app.overlay,
+            fixture.app.overlay,
             Overlay::Confirm(ConfirmOverlay {
                 title,
                 message,
@@ -862,14 +1017,14 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_warns_when_claude_provider_requires_proxy_and_proxy_is_not_running() {
-        let (overlay, current_id) = run_claude_switch("old-provider", "openai_chat", false, false)
+        let fixture = run_claude_switch("old-provider", "openai_chat", false, false)
             .expect("switch should succeed");
 
-        assert_eq!(current_id.providers.current_id, "proxy-provider");
+        assert_eq!(fixture.data.providers.current_id, "proxy-provider");
         assert!(matches!(
-            overlay.overlay,
+            fixture.app.overlay,
             Overlay::Confirm(ConfirmOverlay { title, message, action })
                 if title == texts::tui_claude_api_format_requires_proxy_title()
                     && message == texts::tui_claude_api_format_requires_proxy_message("openai_chat")
@@ -878,15 +1033,14 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_warns_for_openai_responses_when_proxy_is_not_running() {
-        let (overlay, current_id) =
-            run_claude_switch("old-provider", "openai_responses", false, false)
-                .expect("switch should succeed");
+        let fixture = run_claude_switch("old-provider", "openai_responses", false, false)
+            .expect("switch should succeed");
 
-        assert_eq!(current_id.providers.current_id, "proxy-provider");
+        assert_eq!(fixture.data.providers.current_id, "proxy-provider");
         assert!(matches!(
-            overlay.overlay,
+            fixture.app.overlay,
             Overlay::Confirm(ConfirmOverlay { title, message, action })
                 if title == texts::tui_claude_api_format_requires_proxy_title()
                     && message == texts::tui_claude_api_format_requires_proxy_message("openai_responses")
@@ -913,24 +1067,24 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_does_not_warn_when_claude_provider_uses_anthropic_format() {
-        let (overlay, current_id) = run_claude_switch("old-provider", "anthropic", false, true)
+        let fixture = run_claude_switch("old-provider", "anthropic", false, true)
             .expect("switch should succeed");
 
-        assert_eq!(current_id.providers.current_id, "proxy-provider");
-        assert!(matches!(overlay.overlay, Overlay::None));
+        assert_eq!(fixture.data.providers.current_id, "proxy-provider");
+        assert!(matches!(fixture.app.overlay, Overlay::None));
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_shows_first_use_guard_before_overwriting_existing_claude_settings() {
-        let (app, data) =
+        let fixture =
             run_claude_switch("", "anthropic", true, false).expect("guarded switch should succeed");
 
-        assert_eq!(data.providers.current_id, "");
+        assert_eq!(fixture.data.providers.current_id, "");
         assert!(matches!(
-            app.overlay,
+            fixture.app.overlay,
             Overlay::ProviderSwitchFirstUseConfirm {
                 provider_id,
                 title,
@@ -944,27 +1098,27 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_first_use_without_existing_claude_settings_switches_normally() {
-        let (app, data) =
+        let fixture =
             run_claude_switch("", "anthropic", false, false).expect("switch should succeed");
 
-        assert_eq!(data.providers.current_id, "proxy-provider");
-        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(fixture.data.providers.current_id, "proxy-provider");
+        assert!(matches!(fixture.app.overlay, Overlay::None));
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_existing_install_with_current_provider_skips_first_use_guard() {
-        let (app, data) = run_claude_switch("old-provider", "anthropic", true, true)
+        let fixture = run_claude_switch("old-provider", "anthropic", true, true)
             .expect("switch should succeed");
 
-        assert_eq!(data.providers.current_id, "proxy-provider");
-        assert!(matches!(app.overlay, Overlay::None));
+        assert_eq!(fixture.data.providers.current_id, "proxy-provider");
+        assert!(matches!(fixture.app.overlay, Overlay::None));
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_import_live_config_adds_and_selects_imported_provider() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());
@@ -1024,14 +1178,14 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_shows_one_time_shared_config_tip_after_first_real_switch() {
-        let (app, data) = run_claude_switch("old-provider", "anthropic", true, false)
+        let fixture = run_claude_switch("old-provider", "anthropic", true, false)
             .expect("switch should succeed");
 
-        assert_eq!(data.providers.current_id, "proxy-provider");
+        assert_eq!(fixture.data.providers.current_id, "proxy-provider");
         assert!(matches!(
-            app.overlay,
+            fixture.app.overlay,
             Overlay::Confirm(ConfirmOverlay {
                 title,
                 message,
@@ -1043,25 +1197,478 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn provider_switch_queues_shared_config_tip_behind_proxy_notice() {
-        let (app, data) = run_claude_switch("old-provider", "openai_chat", true, false)
+        let fixture = run_claude_switch("old-provider", "openai_chat", true, false)
             .expect("switch should succeed");
 
-        assert_eq!(data.providers.current_id, "proxy-provider");
+        assert_eq!(fixture.data.providers.current_id, "proxy-provider");
         assert!(matches!(
-            app.overlay,
+            fixture.app.overlay,
             Overlay::Confirm(ConfirmOverlay {
                 action: ConfirmAction::ProviderApiFormatProxyNotice,
                 ..
             })
         ));
         assert!(matches!(
-            app.pending_overlay,
+            fixture.app.pending_overlay,
             Some(Overlay::Confirm(ConfirmOverlay {
                 action: ConfirmAction::ProviderSwitchSharedConfigNotice,
                 ..
             }))
         ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_set_default_model_preserves_provider_model_order_as_fallbacks() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(temp_home.path());
+
+        crate::openclaw_config::set_provider(
+            "p1",
+            json!({
+                "api": "openai-completions",
+                "models": [
+                    {"id": "model-primary", "name": "Primary"},
+                    {"id": "model-fallback-1", "name": "Fallback 1"},
+                    {"id": "model-fallback-2", "name": "Fallback 2"}
+                ]
+            }),
+        )
+        .expect("seed live openclaw provider");
+
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+        let mut app = App::new(Some(AppType::OpenClaw));
+        let mut data = UiData::default();
+        data.providers
+            .rows
+            .push(crate::cli::tui::data::ProviderRow {
+                id: "p1".to_string(),
+                provider: Provider::with_id(
+                    "p1".to_string(),
+                    "Provider One".to_string(),
+                    json!({
+                        "api": "openai-completions",
+                        "models": [
+                            {"id": "model-primary", "name": "Primary"},
+                            {"id": "model-fallback-1", "name": "Fallback 1"},
+                            {"id": "model-fallback-2", "name": "Fallback 2"}
+                        ]
+                    }),
+                    None,
+                ),
+                api_url: Some("https://example.com".to_string()),
+                is_current: false,
+                is_in_config: true,
+                is_saved: true,
+                is_default_model: false,
+                primary_model_id: Some("model-primary".to_string()),
+                default_model_id: None,
+            });
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        set_default_model(&mut ctx, "p1".to_string(), "model-primary".to_string())
+            .expect("set default model");
+
+        let default_model = crate::openclaw_config::get_default_model()
+            .expect("read default model")
+            .expect("default model should exist");
+        assert_eq!(default_model.primary, "p1/model-primary");
+        assert_eq!(
+            default_model.fallbacks,
+            vec![
+                "p1/model-fallback-1".to_string(),
+                "p1/model-fallback-2".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_set_default_model_uses_live_primary_when_snapshot_primary_is_stale() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(temp_home.path());
+
+        crate::openclaw_config::set_provider(
+            "p1",
+            json!({
+                "api": "openai-completions",
+                "models": [
+                    {"id": "live-primary", "name": "Live Primary"},
+                    {"id": "snapshot-primary", "name": "Snapshot Primary"},
+                    {"id": "fallback-2", "name": "Fallback 2"}
+                ]
+            }),
+        )
+        .expect("seed live openclaw provider");
+        crate::openclaw_config::set_default_model(&OpenClawDefaultModel {
+            primary: "p1/snapshot-primary".to_string(),
+            fallbacks: vec!["p1/live-primary".to_string(), "p1/fallback-2".to_string()],
+            extra: HashMap::new(),
+        })
+        .expect("seed existing default model");
+
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+        let mut app = App::new(Some(AppType::OpenClaw));
+        let mut data = UiData::default();
+        data.providers
+            .rows
+            .push(crate::cli::tui::data::ProviderRow {
+                id: "p1".to_string(),
+                provider: Provider::with_id(
+                    "p1".to_string(),
+                    "Provider One".to_string(),
+                    json!({
+                        "api": "openai-completions",
+                        "models": [
+                            {"id": "snapshot-primary", "name": "Snapshot Primary"},
+                            {"id": "live-primary", "name": "Live Primary"},
+                            {"id": "fallback-2", "name": "Fallback 2"}
+                        ]
+                    }),
+                    None,
+                ),
+                api_url: Some("https://example.com".to_string()),
+                is_current: false,
+                is_in_config: true,
+                is_saved: true,
+                is_default_model: true,
+                primary_model_id: Some("snapshot-primary".to_string()),
+                default_model_id: Some("snapshot-primary".to_string()),
+            });
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        set_default_model(&mut ctx, "p1".to_string(), "snapshot-primary".to_string())
+            .expect("set default model from x action");
+
+        let default_model = crate::openclaw_config::get_default_model()
+            .expect("read default model")
+            .expect("default model should exist");
+        assert_eq!(default_model.primary, "p1/live-primary");
+        assert_eq!(
+            default_model.fallbacks,
+            vec![
+                "p1/snapshot-primary".to_string(),
+                "p1/fallback-2".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_set_default_model_preserves_existing_extra_fields() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(temp_home.path());
+
+        crate::openclaw_config::set_provider(
+            "p1",
+            json!({
+                "api": "openai-completions",
+                "models": [
+                    {"id": "model-primary", "name": "Primary"},
+                    {"id": "model-fallback-1", "name": "Fallback 1"}
+                ]
+            }),
+        )
+        .expect("seed live openclaw provider");
+        crate::openclaw_config::set_default_model(&OpenClawDefaultModel {
+            primary: "p1/model-fallback-1".to_string(),
+            fallbacks: vec!["p1/model-primary".to_string()],
+            extra: HashMap::from([("reasoningEffort".to_string(), json!("high"))]),
+        })
+        .expect("seed existing default model");
+
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+        let mut app = App::new(Some(AppType::OpenClaw));
+        let mut data = UiData::default();
+        data.providers
+            .rows
+            .push(crate::cli::tui::data::ProviderRow {
+                id: "p1".to_string(),
+                provider: Provider::with_id(
+                    "p1".to_string(),
+                    "Provider One".to_string(),
+                    json!({
+                        "api": "openai-completions",
+                        "models": [
+                            {"id": "model-primary", "name": "Primary"},
+                            {"id": "model-fallback-1", "name": "Fallback 1"}
+                        ]
+                    }),
+                    None,
+                ),
+                api_url: Some("https://example.com".to_string()),
+                is_current: false,
+                is_in_config: true,
+                is_saved: true,
+                is_default_model: true,
+                primary_model_id: Some("model-primary".to_string()),
+                default_model_id: Some("model-fallback-1".to_string()),
+            });
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        set_default_model(&mut ctx, "p1".to_string(), "model-primary".to_string())
+            .expect("set default model");
+
+        let default_model = crate::openclaw_config::get_default_model()
+            .expect("read default model")
+            .expect("default model should exist");
+        assert_eq!(
+            default_model.extra.get("reasoningEffort"),
+            Some(&json!("high"))
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_remove_from_config_rejects_default_provider_even_without_ui_guard() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(temp_home.path());
+
+        crate::openclaw_config::set_provider(
+            "p1",
+            json!({
+                "api": "openai-completions",
+                "models": [{"id": "model-primary"}]
+            }),
+        )
+        .expect("seed live openclaw provider");
+        crate::openclaw_config::set_default_model(&OpenClawDefaultModel {
+            primary: "p1/model-primary".to_string(),
+            fallbacks: Vec::new(),
+            extra: HashMap::new(),
+        })
+        .expect("seed default model");
+
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+        let mut app = App::new(Some(AppType::OpenClaw));
+        let mut data = UiData::default();
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        let err = remove_from_config(&mut ctx, "p1".to_string())
+            .expect_err("default provider should not be removable from live config");
+        match err {
+            AppError::Localized { zh, .. } => assert!(zh.contains("默认")),
+            AppError::Config(msg) => assert!(msg.contains("默认")),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(crate::openclaw_config::get_providers()
+            .expect("read providers after failed remove")
+            .contains_key("p1"));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_remove_from_config_rejects_fallback_only_provider_even_without_ui_guard() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(temp_home.path());
+
+        crate::openclaw_config::set_provider(
+            "p1",
+            json!({
+                "api": "openai-completions",
+                "models": [{"id": "primary-model"}]
+            }),
+        )
+        .expect("seed primary live openclaw provider");
+        crate::openclaw_config::set_provider(
+            "p2",
+            json!({
+                "api": "openai-completions",
+                "models": [{"id": "shared-model"}]
+            }),
+        )
+        .expect("seed fallback live openclaw provider");
+        crate::openclaw_config::set_default_model(&OpenClawDefaultModel {
+            primary: "p1/primary-model".to_string(),
+            fallbacks: vec!["p2/shared-model".to_string()],
+            extra: HashMap::new(),
+        })
+        .expect("seed default model with fallback-only provider reference");
+
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+        let mut app = App::new(Some(AppType::OpenClaw));
+        let mut data = UiData::default();
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        let err = remove_from_config(&mut ctx, "p2".to_string())
+            .expect_err("fallback-only default reference should not be removable");
+        match err {
+            AppError::Localized { zh, .. } => assert!(zh.contains("默认")),
+            AppError::Config(msg) => assert!(msg.contains("默认")),
+            other => panic!("unexpected error: {other:?}"),
+        }
+        assert!(crate::openclaw_config::get_providers()
+            .expect("read providers after failed remove")
+            .contains_key("p2"));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_set_default_model_uses_live_primary_when_snapshot_model_is_missing() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let _settings = SettingsGuard::with_openclaw_dir(temp_home.path());
+
+        crate::openclaw_config::set_provider(
+            "p1",
+            json!({
+                "api": "openai-completions",
+                "models": [{"id": "live-model-only"}]
+            }),
+        )
+        .expect("seed live openclaw provider");
+
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+        let mut app = App::new(Some(AppType::OpenClaw));
+        let mut data = UiData::default();
+        data.providers
+            .rows
+            .push(crate::cli::tui::data::ProviderRow {
+                id: "p1".to_string(),
+                provider: Provider::with_id(
+                    "p1".to_string(),
+                    "Provider One".to_string(),
+                    json!({
+                        "api": "openai-completions",
+                        "models": [
+                            {"id": "model-primary"},
+                            {"id": "model-fallback-1"}
+                        ]
+                    }),
+                    None,
+                ),
+                api_url: Some("https://example.com".to_string()),
+                is_current: false,
+                is_in_config: true,
+                is_saved: true,
+                is_default_model: false,
+                primary_model_id: Some("model-primary".to_string()),
+                default_model_id: None,
+            });
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        set_default_model(&mut ctx, "p1".to_string(), "model-primary".to_string())
+            .expect("x action should fall back to live primary");
+
+        let default_model = crate::openclaw_config::get_default_model()
+            .expect("read default model")
+            .expect("default model should exist");
+        assert_eq!(default_model.primary, "p1/live-model-only");
+        assert!(default_model.fallbacks.is_empty());
     }
 }

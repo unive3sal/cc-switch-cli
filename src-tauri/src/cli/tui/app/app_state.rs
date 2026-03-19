@@ -53,6 +53,13 @@ pub enum Action {
     ProviderSwitch {
         id: String,
     },
+    ProviderRemoveFromConfig {
+        id: String,
+    },
+    ProviderSetDefaultModel {
+        provider_id: String,
+        model_id: String,
+    },
     ProviderSwitchForce {
         id: String,
     },
@@ -166,7 +173,7 @@ pub enum Action {
     CancelUpdateCheck,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConfigItem {
     Path,
     ShowFull,
@@ -177,12 +184,45 @@ pub enum ConfigItem {
     Validate,
     CommonSnippet,
     Proxy,
+    OpenClawEnv,
+    OpenClawTools,
+    OpenClawAgents,
     WebDavSync,
     Reset,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ConfigItemMetadata {
+    pub label: &'static str,
+    pub detail_title: Option<&'static str>,
+    pub detail_route: Option<Route>,
+    pub openclaw_only: bool,
+}
+
+fn config_item_metadata(label: &'static str) -> ConfigItemMetadata {
+    ConfigItemMetadata {
+        label,
+        detail_title: None,
+        detail_route: None,
+        openclaw_only: false,
+    }
+}
+
+fn openclaw_config_item_metadata(
+    label: &'static str,
+    detail_title: &'static str,
+    detail_route: Route,
+) -> ConfigItemMetadata {
+    ConfigItemMetadata {
+        label,
+        detail_title: Some(detail_title),
+        detail_route: Some(detail_route),
+        openclaw_only: true,
+    }
+}
+
 impl ConfigItem {
-    pub const ALL: [ConfigItem; 10] = [
+    pub const ALL: [ConfigItem; 13] = [
         ConfigItem::Path,
         ConfigItem::ShowFull,
         ConfigItem::Export,
@@ -191,9 +231,68 @@ impl ConfigItem {
         ConfigItem::Restore,
         ConfigItem::Validate,
         ConfigItem::CommonSnippet,
+        ConfigItem::OpenClawEnv,
+        ConfigItem::OpenClawTools,
+        ConfigItem::OpenClawAgents,
         ConfigItem::WebDavSync,
         ConfigItem::Reset,
     ];
+
+    pub(crate) fn metadata(&self) -> ConfigItemMetadata {
+        match self {
+            ConfigItem::Path => config_item_metadata(texts::tui_config_item_show_path()),
+            ConfigItem::ShowFull => config_item_metadata(texts::tui_config_item_show_full()),
+            ConfigItem::Export => config_item_metadata(texts::tui_config_item_export()),
+            ConfigItem::Import => config_item_metadata(texts::tui_config_item_import()),
+            ConfigItem::Backup => config_item_metadata(texts::tui_config_item_backup()),
+            ConfigItem::Restore => config_item_metadata(texts::tui_config_item_restore()),
+            ConfigItem::Validate => config_item_metadata(texts::tui_config_item_validate()),
+            ConfigItem::CommonSnippet => {
+                config_item_metadata(texts::tui_config_item_common_snippet())
+            }
+            ConfigItem::Proxy => config_item_metadata(texts::tui_config_item_proxy()),
+            ConfigItem::OpenClawEnv => openclaw_config_item_metadata(
+                texts::tui_config_item_openclaw_env(),
+                texts::tui_openclaw_config_env_title(),
+                Route::ConfigOpenClawEnv,
+            ),
+            ConfigItem::OpenClawTools => openclaw_config_item_metadata(
+                texts::tui_config_item_openclaw_tools(),
+                texts::tui_openclaw_config_tools_title(),
+                Route::ConfigOpenClawTools,
+            ),
+            ConfigItem::OpenClawAgents => openclaw_config_item_metadata(
+                texts::tui_config_item_openclaw_agents_defaults(),
+                texts::tui_openclaw_config_agents_title(),
+                Route::ConfigOpenClawAgents,
+            ),
+            ConfigItem::WebDavSync => config_item_metadata(texts::tui_config_item_webdav_sync()),
+            ConfigItem::Reset => config_item_metadata(texts::tui_config_item_reset()),
+        }
+    }
+
+    pub(crate) fn visible_for_app(&self, app_type: &AppType) -> bool {
+        !self.metadata().openclaw_only || matches!(app_type, AppType::OpenClaw)
+    }
+
+    pub(crate) fn label(&self) -> &'static str {
+        self.metadata().label
+    }
+
+    pub(crate) fn detail_title(&self) -> Option<&'static str> {
+        self.metadata().detail_title
+    }
+
+    pub(crate) fn detail_route(&self) -> Option<Route> {
+        self.metadata().detail_route
+    }
+
+    pub(crate) fn from_openclaw_route(route: &Route) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|item| item.detail_route().as_ref() == Some(route))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

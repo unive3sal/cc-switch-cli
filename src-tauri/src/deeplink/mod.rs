@@ -1,13 +1,14 @@
 //! Deep link import functionality for CC Switch (CLI edition).
 //!
 //! Implements the `ccswitch://v1/import?...` protocol for importing resources.
-//! Currently supports importing provider configurations for Claude/Codex/Gemini.
+//! Currently supports importing provider configurations for Claude/Codex/Gemini/OpenCode/OpenClaw.
 
 mod parser;
 mod provider;
 mod utils;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 pub use parser::parse_deeplink_url;
 pub use provider::import_provider_from_deeplink;
@@ -83,4 +84,7 @@ pub struct DeepLinkImportRequest {
     pub usage_user_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage_auto_interval: Option<u64>,
+
+    #[serde(skip)]
+    pub(crate) openclaw_config: Option<Value>,
 }

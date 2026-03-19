@@ -264,6 +264,18 @@ impl ProviderService {
                     )
                 })
                 .map(|s| s.to_string()),
+            AppType::OpenClaw => provider
+                .settings_config
+                .get("apiKey")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    AppError::localized(
+                        "provider.openclaw.api_key.missing",
+                        "缺少 API Key",
+                        "API key is missing",
+                    )
+                })
+                .map(|s| s.to_string()),
         }
     }
 
@@ -338,6 +350,12 @@ impl ProviderService {
                 .settings_config
                 .get("options")
                 .and_then(|v| v.get("baseURL"))
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string()),
+            AppType::OpenClaw => Ok(provider
+                .settings_config
+                .get("baseUrl")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string()),

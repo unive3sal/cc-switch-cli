@@ -1,3 +1,5 @@
+use crate::cli::tui::data;
+
 use super::*;
 
 pub(super) fn render_main(
@@ -12,8 +14,8 @@ pub(super) fn render_main(
         .rows
         .iter()
         .find(|p| p.is_current)
-        .map(|p| p.provider.name.as_str())
-        .unwrap_or(texts::none());
+        .map(|row| data::provider_display_name(&app.app_type, row))
+        .unwrap_or_else(|| texts::none().to_string());
 
     let mcp_enabled = data
         .mcp
@@ -67,7 +69,7 @@ pub(super) fn render_main(
             texts::provider_label(),
             label_width,
             vec![
-                Span::styled(current_provider.to_string(), provider_name_style),
+                Span::styled(current_provider.clone(), provider_name_style),
                 // Do not claim a connection state until a real health check has run.
                 Span::raw("   "),
                 Span::styled(

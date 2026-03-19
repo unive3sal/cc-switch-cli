@@ -12,6 +12,7 @@ mod gemini_mcp;
 mod import_export;
 mod init_status;
 mod mcp;
+mod openclaw_config;
 mod opencode_config;
 mod prompt;
 mod prompt_files;
@@ -23,6 +24,9 @@ mod settings;
 mod store;
 mod sync_policy;
 mod usage_script;
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 // CLI module
 pub mod cli;

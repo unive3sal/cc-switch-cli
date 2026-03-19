@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use indexmap::IndexMap;
@@ -5,6 +6,9 @@ use serde_json::Value;
 
 use crate::app_config::{AppType, CommonConfigSnippets, McpServer};
 use crate::error::AppError;
+use crate::openclaw_config::{
+    OpenClawAgentsDefaults, OpenClawEnvConfig, OpenClawHealthWarning, OpenClawToolsConfig,
+};
 use crate::prompt::Prompt;
 use crate::provider::Provider;
 use crate::services::config::BackupInfo;
@@ -17,6 +21,11 @@ pub struct ProviderRow {
     pub provider: Provider,
     pub api_url: Option<String>,
     pub is_current: bool,
+    pub is_in_config: bool,
+    pub is_saved: bool,
+    pub is_default_model: bool,
+    pub primary_model_id: Option<String>,
+    pub default_model_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -55,6 +64,12 @@ pub struct ConfigSnapshot {
     pub common_snippet: String,
     pub common_snippets: CommonConfigSnippets,
     pub webdav_sync: Option<crate::settings::WebDavSyncSettings>,
+    pub openclaw_config_path: Option<PathBuf>,
+    pub openclaw_config_dir: Option<PathBuf>,
+    pub openclaw_env: Option<OpenClawEnvConfig>,
+    pub openclaw_tools: Option<OpenClawToolsConfig>,
+    pub openclaw_agents_defaults: Option<OpenClawAgentsDefaults>,
+    pub openclaw_warnings: Option<Vec<OpenClawHealthWarning>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -99,6 +114,7 @@ impl ProxySnapshot {
             AppType::Codex => Some(self.codex_takeover),
             AppType::Gemini => Some(self.gemini_takeover),
             AppType::OpenCode => None,
+            AppType::OpenClaw => None,
         }
     }
 
@@ -149,20 +165,89 @@ impl UiData {
     }
 }
 
+pub(crate) fn provider_display_name(app_type: &AppType, row: &ProviderRow) -> String {
+    let name = row.provider.name.trim();
+    if !name.is_empty() {
+        return row.provider.name.clone();
+    }
+
+    if matches!(app_type, AppType::OpenClaw) {
+        return row.id.clone();
+    }
+
+    row.provider.name.clone()
+}
+
 fn load_providers(state: &AppState, app_type: &AppType) -> Result<ProvidersSnapshot, AppError> {
+    if matches!(app_type, AppType::OpenClaw) {
+        ProviderService::sync_openclaw_providers_from_live(state)?;
+    }
+
     let current_id = ProviderService::current(state, app_type.clone())?;
     let providers = ProviderService::list(state, app_type.clone())?;
     let sorted = sort_providers(&providers);
 
+    let openclaw_live_providers = if matches!(app_type, AppType::OpenClaw) {
+        crate::openclaw_config::get_providers()?
+    } else {
+        serde_json::Map::new()
+    };
+    let openclaw_live_ids = if matches!(app_type, AppType::OpenClaw) {
+        ProviderService::valid_openclaw_live_provider_ids()?.unwrap_or_default()
+    } else {
+        HashSet::new()
+    };
+    let openclaw_default_model = if matches!(app_type, AppType::OpenClaw) {
+        crate::openclaw_config::get_default_model()?
+    } else {
+        None
+    };
+    let openclaw_default_model_ids =
+        openclaw_default_model_ids_by_provider(openclaw_default_model.as_ref());
+    let openclaw_primary_default_provider_id = openclaw_default_model
+        .as_ref()
+        .and_then(|model| openclaw_default_model_ref_parts(&model.primary))
+        .map(|(provider_id, _)| provider_id.to_string());
+
     let rows = sorted
         .into_iter()
-        .map(|(id, provider)| ProviderRow {
-            api_url: extract_api_url(&provider.settings_config, app_type),
-            is_current: id == current_id,
-            id: id.clone(),
-            provider,
+        .map(|(id, provider)| {
+            let openclaw_live_provider = openclaw_live_providers
+                .get(&id)
+                .filter(|_| openclaw_live_ids.contains(&id));
+            let provider = openclaw_provider_for_row(&id, provider, openclaw_live_provider);
+
+            ProviderRow {
+                api_url: extract_api_url(&provider.settings_config, app_type),
+                is_current: id == current_id,
+                is_in_config: match app_type {
+                    AppType::OpenClaw => openclaw_live_ids.contains(&id),
+                    _ => true,
+                },
+                is_saved: true,
+                is_default_model: openclaw_primary_default_provider_id.as_deref()
+                    == Some(id.as_str()),
+                primary_model_id: extract_primary_model_id(
+                    &provider.settings_config,
+                    app_type,
+                    openclaw_live_provider,
+                ),
+                default_model_id: openclaw_default_model_ids.get(&id).cloned(),
+                id: id.clone(),
+                provider,
+            }
         })
         .collect::<Vec<_>>();
+
+    let rows = if matches!(app_type, AppType::OpenClaw)
+        && crate::openclaw_config::get_openclaw_config_path().exists()
+    {
+        rows.into_iter()
+            .filter(|row| row.is_in_config)
+            .collect::<Vec<_>>()
+    } else {
+        rows
+    };
 
     Ok(ProvidersSnapshot { current_id, rows })
 }
@@ -220,7 +305,75 @@ fn extract_api_url(settings_config: &Value, app_type: &AppType) -> Option<String
             .get("baseURL")?
             .as_str()
             .map(|s| s.to_string()),
+        AppType::OpenClaw => settings_config
+            .get("baseUrl")
+            .or_else(|| settings_config.get("base_url"))?
+            .as_str()
+            .map(|s| s.to_string()),
     }
+}
+
+fn extract_primary_model_id(
+    settings_config: &Value,
+    app_type: &AppType,
+    openclaw_live_provider: Option<&Value>,
+) -> Option<String> {
+    match app_type {
+        AppType::OpenClaw => match openclaw_live_provider {
+            Some(live_provider) => openclaw_primary_model_id(live_provider),
+            None => openclaw_primary_model_id(settings_config),
+        },
+        _ => None,
+    }
+}
+
+fn openclaw_provider_for_row(
+    _id: &str,
+    provider: Provider,
+    openclaw_live_provider: Option<&Value>,
+) -> Provider {
+    let Some(live_provider) = openclaw_live_provider else {
+        return provider;
+    };
+
+    let mut provider = provider;
+    provider.settings_config = live_provider.clone();
+    provider
+}
+
+fn openclaw_primary_model_id(provider_value: &Value) -> Option<String> {
+    provider_value
+        .get("models")
+        .and_then(Value::as_array)
+        .and_then(|models| models.first())
+        .and_then(|model| model.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn openclaw_default_model_ids_by_provider(
+    default_model: Option<&crate::openclaw_config::OpenClawDefaultModel>,
+) -> HashMap<String, String> {
+    let Some(default_model) = default_model else {
+        return HashMap::new();
+    };
+
+    let mut ids = HashMap::new();
+    for model_ref in std::iter::once(default_model.primary.as_str())
+        .chain(default_model.fallbacks.iter().map(String::as_str))
+    {
+        let Some((provider_id, model_id)) = openclaw_default_model_ref_parts(model_ref) else {
+            continue;
+        };
+        ids.entry(provider_id.to_string())
+            .or_insert_with(|| model_id.to_string());
+    }
+
+    ids
+}
+
+fn openclaw_default_model_ref_parts(default_ref: &str) -> Option<(&str, &str)> {
+    default_ref.split_once('/')
 }
 
 fn load_mcp(state: &AppState) -> Result<McpSnapshot, AppError> {
@@ -262,6 +415,7 @@ fn load_config_snapshot(state: &AppState, app_type: &AppType) -> Result<ConfigSn
         let common_snippet = common_snippets.get(app_type).cloned().unwrap_or_default();
         (common_snippet, common_snippets)
     };
+    let openclaw_snapshot = load_openclaw_config_snapshot(app_type)?;
 
     Ok(ConfigSnapshot {
         config_path,
@@ -270,7 +424,75 @@ fn load_config_snapshot(state: &AppState, app_type: &AppType) -> Result<ConfigSn
         common_snippet,
         common_snippets,
         webdav_sync: crate::settings::get_webdav_sync_settings(),
+        openclaw_config_path: openclaw_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.config_path.clone()),
+        openclaw_config_dir: openclaw_snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.config_dir.clone()),
+        openclaw_env: openclaw_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.env.clone()),
+        openclaw_tools: openclaw_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.tools.clone()),
+        openclaw_agents_defaults: openclaw_snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.agents_defaults.clone()),
+        openclaw_warnings: openclaw_snapshot.map(|snapshot| snapshot.warnings),
     })
+}
+
+#[derive(Debug, Clone)]
+struct OpenClawConfigSnapshot {
+    config_path: PathBuf,
+    config_dir: PathBuf,
+    env: Option<OpenClawEnvConfig>,
+    tools: Option<OpenClawToolsConfig>,
+    agents_defaults: Option<OpenClawAgentsDefaults>,
+    warnings: Vec<OpenClawHealthWarning>,
+}
+
+fn load_openclaw_config_snapshot(
+    app_type: &AppType,
+) -> Result<Option<OpenClawConfigSnapshot>, AppError> {
+    if !matches!(app_type, AppType::OpenClaw) {
+        return Ok(None);
+    }
+
+    let warnings = crate::openclaw_config::scan_openclaw_config_health()?;
+    let env = load_openclaw_slice("env", crate::openclaw_config::get_env_config)?;
+    let tools = load_openclaw_slice("tools", crate::openclaw_config::get_tools_config)?;
+    let agents_defaults = load_openclaw_slice(
+        "agents.defaults",
+        crate::openclaw_config::get_agents_defaults,
+    )?;
+
+    Ok(Some(OpenClawConfigSnapshot {
+        config_path: crate::openclaw_config::get_openclaw_config_path(),
+        config_dir: crate::openclaw_config::get_openclaw_dir(),
+        env: Some(env),
+        tools: Some(tools),
+        agents_defaults,
+        warnings,
+    }))
+}
+
+fn load_openclaw_slice<T, F>(section_name: &'static str, loader: F) -> Result<T, AppError>
+where
+    T: Default,
+    F: FnOnce() -> Result<T, AppError>,
+{
+    match loader() {
+        Ok(value) => Ok(value),
+        Err(AppError::Config(message)) => {
+            log::warn!(
+                "Failed to load OpenClaw config section '{section_name}' for TUI snapshot: {message}"
+            );
+            Ok(T::default())
+        }
+        Err(err) => Err(err),
+    }
 }
 
 pub(crate) fn load_proxy_config() -> Result<Option<crate::proxy::ProxyConfig>, AppError> {
@@ -372,6 +594,67 @@ fn load_skills_snapshot() -> Result<SkillsSnapshot, AppError> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use serial_test::serial;
+    use std::path::Path;
+    use tempfile::tempdir;
+
+    use crate::settings::{get_settings, update_settings, AppSettings};
+    use crate::test_support::{lock_test_home_and_settings, set_test_home_override};
+
+    struct HomeGuard {
+        old_home: Option<std::ffi::OsString>,
+        old_userprofile: Option<std::ffi::OsString>,
+    }
+
+    impl HomeGuard {
+        fn set(home: &Path) -> Self {
+            let old_home = std::env::var_os("HOME");
+            let old_userprofile = std::env::var_os("USERPROFILE");
+            std::env::set_var("HOME", home);
+            std::env::set_var("USERPROFILE", home);
+            set_test_home_override(Some(home));
+            crate::settings::reload_test_settings();
+            Self {
+                old_home,
+                old_userprofile,
+            }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.old_home.take() {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match self.old_userprofile.take() {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            set_test_home_override(self.old_home.as_deref().map(Path::new));
+            crate::settings::reload_test_settings();
+        }
+    }
+
+    struct SettingsGuard {
+        previous: AppSettings,
+    }
+
+    impl SettingsGuard {
+        fn with_openclaw_dir(path: &Path) -> Self {
+            let previous = get_settings();
+            let mut settings = AppSettings::default();
+            settings.openclaw_config_dir = Some(path.display().to_string());
+            update_settings(settings).expect("set openclaw override dir");
+            Self { previous }
+        }
+    }
+
+    impl Drop for SettingsGuard {
+        fn drop(&mut self) {
+            update_settings(self.previous.clone()).expect("restore previous settings");
+        }
+    }
 
     #[test]
     fn extract_api_url_gemini_prefers_google_env_key() {
@@ -497,6 +780,871 @@ mod tests {
                 .as_ref()
                 .map(|target| target.provider_name.as_str()),
             Some("Claude Test Provider")
+        );
+    }
+
+    #[test]
+    fn openclaw_default_model_ids_by_provider_includes_fallback_only_provider() {
+        let default_model = crate::openclaw_config::OpenClawDefaultModel {
+            primary: "primary/model-primary".to_string(),
+            fallbacks: vec![
+                "fallback-only/shared-model".to_string(),
+                "primary/model-fallback".to_string(),
+            ],
+            extra: std::collections::HashMap::new(),
+        };
+
+        let model_ids = openclaw_default_model_ids_by_provider(Some(&default_model));
+
+        assert_eq!(
+            model_ids.get("primary").map(String::as_str),
+            Some("model-primary")
+        );
+        assert_eq!(
+            model_ids.get("fallback-only").map(String::as_str),
+            Some("shared-model")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_config_snapshot_includes_slice_and_warning_data() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("tempdir");
+        let _home = HomeGuard::set(temp.path());
+
+        let openclaw_dir = temp.path().join("openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let source = r#"{
+  env: {
+    OPENCLAW_ENV_TOKEN: 'demo-token',
+  },
+  tools: {
+    profile: 'unsupported-profile',
+    allow: ['bash'],
+  },
+  agents: {
+    defaults: {
+      timeout: 42,
+      model: {
+        primary: 'demo/main',
+      },
+    },
+  },
+}"#;
+        std::fs::write(openclaw_dir.join("openclaw.json"), source).expect("write openclaw config");
+
+        let state = load_state().expect("load state");
+        let snapshot = load_config_snapshot(&state, &AppType::OpenClaw).expect("load snapshot");
+
+        assert_eq!(snapshot.openclaw_config_dir.as_ref(), Some(&openclaw_dir));
+        assert_eq!(
+            snapshot.openclaw_config_path.as_ref(),
+            Some(&openclaw_dir.join("openclaw.json"))
+        );
+        assert_eq!(
+            snapshot
+                .openclaw_env
+                .as_ref()
+                .and_then(|env| env.vars.get("OPENCLAW_ENV_TOKEN"))
+                .and_then(|value| value.as_str()),
+            Some("demo-token")
+        );
+        assert_eq!(
+            snapshot
+                .openclaw_tools
+                .as_ref()
+                .and_then(|tools| tools.profile.as_deref()),
+            Some("unsupported-profile")
+        );
+        assert_eq!(
+            snapshot
+                .openclaw_agents_defaults
+                .as_ref()
+                .and_then(|defaults| defaults.model.as_ref())
+                .map(|model| model.primary.as_str()),
+            Some("demo/main")
+        );
+        assert!(snapshot
+            .openclaw_warnings
+            .as_ref()
+            .is_some_and(|warnings| warnings.iter().any(|warning| {
+                warning.code == "invalid_tools_profile" || warning.code == "legacy_agents_timeout"
+            })));
+    }
+
+    #[test]
+    #[serial]
+    fn non_openclaw_config_snapshot_leaves_openclaw_fields_unset() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("tempdir");
+        let _home = HomeGuard::set(temp.path());
+
+        let state = load_state().expect("load state");
+        let snapshot = load_config_snapshot(&state, &AppType::Claude).expect("load snapshot");
+
+        assert!(snapshot.openclaw_config_path.is_none());
+        assert!(snapshot.openclaw_config_dir.is_none());
+        assert!(snapshot.openclaw_env.is_none());
+        assert!(snapshot.openclaw_tools.is_none());
+        assert!(snapshot.openclaw_agents_defaults.is_none());
+        assert!(snapshot.openclaw_warnings.is_none());
+    }
+
+    #[test]
+    fn openclaw_default_model_ids_by_provider_prefers_primary_reference_for_same_provider() {
+        let default_model = crate::openclaw_config::OpenClawDefaultModel {
+            primary: "demo/shared-model".to_string(),
+            fallbacks: vec!["demo/secondary-model".to_string()],
+            extra: std::collections::HashMap::new(),
+        };
+
+        assert_eq!(
+            openclaw_default_model_ids_by_provider(Some(&default_model))
+                .get("demo")
+                .map(String::as_str),
+            Some("shared-model")
+        );
+    }
+
+    #[test]
+    fn extract_primary_model_id_openclaw_prefers_live_provider_models() {
+        let saved = json!({
+            "models": [
+                {"id": "snapshot-primary"},
+                {"id": "fallback-1"}
+            ]
+        });
+        let live = json!({
+            "models": [
+                {"id": "live-primary"},
+                {"id": "snapshot-primary"},
+                {"id": "fallback-1"}
+            ]
+        });
+
+        assert_eq!(
+            extract_primary_model_id(&saved, &AppType::OpenClaw, Some(&live)),
+            Some("live-primary".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_primary_model_id_openclaw_falls_back_to_saved_provider_models() {
+        let saved = json!({
+            "models": [
+                {"id": "snapshot-primary"},
+                {"id": "fallback-1"}
+            ]
+        });
+
+        assert_eq!(
+            extract_primary_model_id(&saved, &AppType::OpenClaw, None),
+            Some("snapshot-primary".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_primary_model_id_openclaw_does_not_fall_back_when_live_provider_has_no_models() {
+        let saved = json!({
+            "models": [
+                {"id": "snapshot-primary"},
+                {"id": "fallback-1"}
+            ]
+        });
+        let live = json!({"models": []});
+
+        assert_eq!(
+            extract_primary_model_id(&saved, &AppType::OpenClaw, Some(&live)),
+            None
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn load_providers_openclaw_syncs_live_only_provider_into_local_manager() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("create tempdir");
+        let openclaw_dir = temp.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _home = HomeGuard::set(temp.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        crate::openclaw_config::set_provider(
+            "live-only",
+            json!({
+                "baseUrl": "https://api.example.com/v1",
+                "models": [
+                    {"id": "openclaw-live-model", "name": "Live Only Model"}
+                ]
+            }),
+        )
+        .expect("seed live openclaw provider");
+
+        let state = load_state().expect("load state");
+        assert!(
+            state
+                .config
+                .read()
+                .expect("read config before load")
+                .get_manager(&AppType::OpenClaw)
+                .expect("openclaw manager before load")
+                .providers
+                .is_empty(),
+            "precondition: local manager should start empty"
+        );
+
+        let snapshot = load_providers(&state, &AppType::OpenClaw).expect("load openclaw rows");
+        let row = snapshot
+            .rows
+            .iter()
+            .find(|row| row.id == "live-only")
+            .expect("live-only provider should appear in TUI rows");
+        assert!(row.is_in_config);
+        assert_eq!(provider_display_name(&AppType::OpenClaw, row), "live-only");
+        assert_eq!(row.provider.name, "live-only");
+        assert_eq!(row.primary_model_id.as_deref(), Some("openclaw-live-model"));
+        assert!(row.is_saved);
+
+        let providers =
+            ProviderService::list(&state, AppType::OpenClaw).expect("list providers after load");
+        assert!(
+            providers.contains_key("live-only"),
+            "loading OpenClaw rows should mirror live providers into the local manager"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn load_providers_openclaw_skips_modeless_live_provider() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("create tempdir");
+        let openclaw_dir = temp.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _home = HomeGuard::set(temp.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        std::fs::write(
+            openclaw_dir.join("openclaw.json"),
+            r#"{
+  models: {
+    mode: 'merge',
+    providers: {
+      modeless: {
+        baseUrl: 'https://api.example.com/v1',
+        models: [],
+      },
+    },
+  },
+}
+"#,
+        )
+        .expect("seed modeless openclaw provider");
+
+        let state = load_state().expect("load state");
+
+        let snapshot = load_providers(&state, &AppType::OpenClaw).expect("load openclaw rows");
+        assert!(
+            snapshot.rows.iter().all(|row| row.id != "modeless"),
+            "OpenClaw rows without models should stay hidden from the TUI"
+        );
+
+        let providers =
+            ProviderService::list(&state, AppType::OpenClaw).expect("list providers after load");
+        assert!(
+            !providers.contains_key("modeless"),
+            "modeless OpenClaw providers should not be mirrored into the local manager"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn load_providers_openclaw_skips_blank_model_id_live_provider() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("create tempdir");
+        let openclaw_dir = temp.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _home = HomeGuard::set(temp.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        std::fs::write(
+            openclaw_dir.join("openclaw.json"),
+            r#"{
+  models: {
+    mode: 'merge',
+    providers: {
+      keep: {
+        baseUrl: 'https://keep.example.com/v1',
+        models: [{ id: 'keep-model', name: 'Keep Model' }],
+      },
+      'blank-model-id': {
+        baseUrl: 'https://blank.example.com/v1',
+        models: [{ id: '   ', name: 'Blank Id' }],
+      },
+    },
+  },
+}
+"#,
+        )
+        .expect("seed openclaw providers with blank model id");
+
+        let state = load_state().expect("load state");
+
+        let snapshot = load_providers(&state, &AppType::OpenClaw).expect("load openclaw rows");
+        assert!(
+            snapshot.rows.iter().any(|row| row.id == "keep"),
+            "valid OpenClaw providers should still load when a sibling live entry is invalid"
+        );
+        assert!(
+            snapshot.rows.iter().all(|row| row.id != "blank-model-id"),
+            "blank-model-id OpenClaw rows should stay hidden from the TUI"
+        );
+
+        let providers =
+            ProviderService::list(&state, AppType::OpenClaw).expect("list providers after load");
+        assert!(providers.contains_key("keep"));
+        assert!(
+            !providers.contains_key("blank-model-id"),
+            "blank OpenClaw model ids should not be mirrored into the local manager"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn load_providers_openclaw_hides_invalid_live_row_but_preserves_saved_metadata() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("create tempdir");
+        let openclaw_dir = temp.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _home = HomeGuard::set(temp.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let state = load_state().expect("load state");
+        {
+            let mut config = state.config.write().expect("lock config");
+            let manager = config
+                .get_manager_mut(&AppType::OpenClaw)
+                .expect("openclaw manager");
+            let mut provider = Provider::with_id(
+                "preserved".to_string(),
+                "Saved Provider Name".to_string(),
+                json!({
+                    "baseUrl": "https://saved.example.com/v1",
+                    "models": [
+                        {"id": "saved-model", "name": "Saved Model"}
+                    ]
+                }),
+                None,
+            );
+            provider.notes = Some("keep this metadata".to_string());
+            manager.providers.insert("preserved".to_string(), provider);
+        }
+        state.save().expect("persist saved snapshot provider");
+
+        std::fs::write(
+            openclaw_dir.join("openclaw.json"),
+            r#"{
+  models: {
+    mode: 'merge',
+    providers: {
+      preserved: {
+        baseUrl: 'https://live.invalid.example.com/v1',
+        models: [],
+      },
+    },
+  },
+}
+"#,
+        )
+        .expect("seed invalid openclaw provider");
+
+        let snapshot = load_providers(&state, &AppType::OpenClaw).expect("load openclaw rows");
+        assert!(
+            snapshot.rows.iter().all(|row| row.id != "preserved"),
+            "invalid-but-present OpenClaw live entries should stay hidden from the TUI"
+        );
+
+        let providers =
+            ProviderService::list(&state, AppType::OpenClaw).expect("list providers after load");
+        let preserved = providers
+            .get("preserved")
+            .expect("saved snapshot row should remain in the local mirror");
+        assert_eq!(preserved.name, "Saved Provider Name");
+        assert_eq!(preserved.notes.as_deref(), Some("keep this metadata"));
+        assert_eq!(
+            preserved.settings_config["baseUrl"],
+            json!("https://saved.example.com/v1"),
+            "invalid live rows should not become authoritative for the saved mirror"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn load_providers_openclaw_keeps_customized_name_when_metadata_exists() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("create tempdir");
+        let openclaw_dir = temp.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _home = HomeGuard::set(temp.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let state = load_state().expect("load state");
+        {
+            let mut config = state.config.write().expect("lock config");
+            let manager = config
+                .get_manager_mut(&AppType::OpenClaw)
+                .expect("openclaw manager");
+            let mut provider = Provider::with_id(
+                "shared-id".to_string(),
+                "Saved Snapshot Name".to_string(),
+                json!({
+                    "baseUrl": "https://snapshot.example.com/v1",
+                    "models": [
+                        {"id": "snapshot-model", "name": "Snapshot Model"}
+                    ]
+                }),
+                None,
+            );
+            provider.notes = Some("customized via deeplink".to_string());
+            manager.providers.insert("shared-id".to_string(), provider);
+        }
+        state.save().expect("persist snapshot provider");
+
+        crate::openclaw_config::set_provider(
+            "shared-id",
+            json!({
+                "baseUrl": "https://live.example.com/v1",
+                "models": [
+                    {"id": "live-model", "name": "Live Model Name"}
+                ]
+            }),
+        )
+        .expect("seed live openclaw provider");
+
+        let snapshot = load_providers(&state, &AppType::OpenClaw).expect("load openclaw rows");
+        let row = snapshot
+            .rows
+            .iter()
+            .find(|row| row.id == "shared-id")
+            .expect("existing snapshot provider should still be listed");
+
+        assert_eq!(
+            provider_display_name(&AppType::OpenClaw, row),
+            "Saved Snapshot Name"
+        );
+        assert_eq!(row.provider.name, "Saved Snapshot Name");
+        assert_eq!(row.api_url.as_deref(), Some("https://live.example.com/v1"));
+        assert_eq!(row.primary_model_id.as_deref(), Some("live-model"));
+        assert_eq!(
+            row.provider.settings_config["baseUrl"].as_str(),
+            Some("https://live.example.com/v1")
+        );
+
+        let providers =
+            ProviderService::list(&state, AppType::OpenClaw).expect("list providers after sync");
+        assert_eq!(
+            providers
+                .get("shared-id")
+                .map(|provider| provider.name.as_str()),
+            Some("Saved Snapshot Name")
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn load_providers_openclaw_normalizes_uncustomized_snapshot_names_to_provider_id() {
+        for saved_name in ["", "Live Model Name", "Old Model Name"] {
+            let _guard = lock_test_home_and_settings();
+            let temp = tempdir().expect("create tempdir");
+            let openclaw_dir = temp.path().join(".openclaw");
+            std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+            let _home = HomeGuard::set(temp.path());
+            let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+            let state = load_state().expect("load state");
+            {
+                let mut config = state.config.write().expect("lock config");
+                let manager = config
+                    .get_manager_mut(&AppType::OpenClaw)
+                    .expect("openclaw manager");
+                manager.providers.insert(
+                    "shared-id".to_string(),
+                    Provider::with_id(
+                        "shared-id".to_string(),
+                        saved_name.to_string(),
+                        json!({
+                            "baseUrl": "https://snapshot.example.com/v1",
+                            "models": [
+                                {"id": "snapshot-model", "name": "Snapshot Model"}
+                            ]
+                        }),
+                        None,
+                    ),
+                );
+            }
+            state.save().expect("persist snapshot provider");
+
+            crate::openclaw_config::set_provider(
+                "shared-id",
+                json!({
+                    "baseUrl": "https://live.example.com/v1",
+                    "models": [
+                        {"id": "live-model", "name": "Live Model Name"}
+                    ]
+                }),
+            )
+            .expect("seed live openclaw provider");
+
+            let snapshot = load_providers(&state, &AppType::OpenClaw).expect("load openclaw rows");
+            let row = snapshot
+                .rows
+                .iter()
+                .find(|row| row.id == "shared-id")
+                .expect("existing snapshot provider should still be listed");
+
+            assert_eq!(provider_display_name(&AppType::OpenClaw, row), "shared-id");
+            assert_eq!(row.provider.name, "shared-id");
+
+            let providers = ProviderService::list(&state, AppType::OpenClaw)
+                .expect("list providers after normalization");
+            assert_eq!(
+                providers
+                    .get("shared-id")
+                    .map(|provider| provider.name.as_str()),
+                Some("shared-id")
+            );
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn load_providers_openclaw_normalizes_model_like_name_with_only_default_common_config_meta() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("create tempdir");
+        let openclaw_dir = temp.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _home = HomeGuard::set(temp.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let state = load_state().expect("load state");
+        {
+            let mut config = state.config.write().expect("lock config");
+            let manager = config
+                .get_manager_mut(&AppType::OpenClaw)
+                .expect("openclaw manager");
+            let mut provider = Provider::with_id(
+                "shared-id".to_string(),
+                "Old Model Name".to_string(),
+                json!({
+                    "baseUrl": "https://snapshot.example.com/v1",
+                    "models": [
+                        {"id": "snapshot-model", "name": "Snapshot Model"}
+                    ]
+                }),
+                None,
+            );
+            provider.meta = Some(crate::provider::ProviderMeta {
+                apply_common_config: Some(false),
+                ..Default::default()
+            });
+            manager.providers.insert("shared-id".to_string(), provider);
+        }
+        state.save().expect("persist snapshot provider");
+
+        crate::openclaw_config::set_provider(
+            "shared-id",
+            json!({
+                "baseUrl": "https://live.example.com/v1",
+                "models": [
+                    {"id": "live-model", "name": "Live Model Name"}
+                ]
+            }),
+        )
+        .expect("seed live openclaw provider");
+
+        let snapshot = load_providers(&state, &AppType::OpenClaw).expect("load openclaw rows");
+        let row = snapshot
+            .rows
+            .iter()
+            .find(|row| row.id == "shared-id")
+            .expect("existing snapshot provider should still be listed");
+
+        assert_eq!(provider_display_name(&AppType::OpenClaw, row), "shared-id");
+        assert_eq!(row.provider.name, "shared-id");
+    }
+
+    #[test]
+    #[serial]
+    fn load_providers_openclaw_keeps_model_like_name_when_row_has_real_metadata() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("create tempdir");
+        let openclaw_dir = temp.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _home = HomeGuard::set(temp.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let state = load_state().expect("load state");
+        {
+            let mut config = state.config.write().expect("lock config");
+            let manager = config
+                .get_manager_mut(&AppType::OpenClaw)
+                .expect("openclaw manager");
+            let mut provider = Provider::with_id(
+                "shared-id".to_string(),
+                "Old Model Name".to_string(),
+                json!({
+                    "baseUrl": "https://snapshot.example.com/v1",
+                    "models": [
+                        {"id": "snapshot-model", "name": "Snapshot Model"}
+                    ]
+                }),
+                None,
+            );
+            provider.meta = Some(crate::provider::ProviderMeta {
+                apply_common_config: Some(false),
+                cost_multiplier: Some("1.2".to_string()),
+                ..Default::default()
+            });
+            manager.providers.insert("shared-id".to_string(), provider);
+        }
+        state.save().expect("persist snapshot provider");
+
+        crate::openclaw_config::set_provider(
+            "shared-id",
+            json!({
+                "baseUrl": "https://live.example.com/v1",
+                "models": [
+                    {"id": "live-model", "name": "Live Model Name"}
+                ]
+            }),
+        )
+        .expect("seed live openclaw provider");
+
+        let snapshot = load_providers(&state, &AppType::OpenClaw).expect("load openclaw rows");
+        let row = snapshot
+            .rows
+            .iter()
+            .find(|row| row.id == "shared-id")
+            .expect("existing snapshot provider should still be listed");
+
+        assert_eq!(
+            provider_display_name(&AppType::OpenClaw, row),
+            "Old Model Name"
+        );
+        assert_eq!(row.provider.name, "Old Model Name");
+    }
+
+    #[test]
+    #[serial]
+    fn load_providers_openclaw_hides_saved_only_snapshot_rows_missing_from_live_but_preserves_local_metadata(
+    ) {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("create tempdir");
+        let openclaw_dir = temp.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _home = HomeGuard::set(temp.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        crate::openclaw_config::set_provider(
+            "keep",
+            json!({
+                "baseUrl": "https://keep.example.com/v1",
+                "models": [
+                    {"id": "keep-model", "name": "Keep Model"}
+                ]
+            }),
+        )
+        .expect("seed live openclaw provider");
+
+        let state = load_state().expect("load state");
+        {
+            let mut config = state.config.write().expect("lock config");
+            let manager = config
+                .get_manager_mut(&AppType::OpenClaw)
+                .expect("openclaw manager");
+            let mut provider = Provider::with_id(
+                "saved-only".to_string(),
+                "Saved Only".to_string(),
+                json!({
+                    "baseUrl": "https://saved.example.com/v1",
+                    "models": [
+                        {"id": "saved-model", "name": "Saved Model"}
+                    ]
+                }),
+                None,
+            );
+            provider.notes = Some("keep this note".to_string());
+            manager.providers.insert("saved-only".to_string(), provider);
+        }
+        state.save().expect("persist stale snapshot provider");
+
+        let snapshot = load_providers(&state, &AppType::OpenClaw).expect("load openclaw rows");
+        assert!(
+            snapshot.rows.iter().all(|row| row.id != "saved-only"),
+            "saved-only OpenClaw rows should stay hidden when the provider no longer exists in openclaw.json"
+        );
+
+        let providers =
+            ProviderService::list(&state, AppType::OpenClaw).expect("list providers after sync");
+        let saved_only = providers.get("saved-only").expect(
+            "loading the OpenClaw screen should preserve saved-only rows in the local mirror",
+        );
+        assert_eq!(saved_only.name, "Saved Only");
+        assert_eq!(saved_only.notes.as_deref(), Some("keep this note"));
+        assert_eq!(
+            saved_only.settings_config["baseUrl"],
+            json!("https://saved.example.com/v1"),
+            "rows missing from live OpenClaw config should keep their saved metadata and settings"
+        );
+        assert!(providers.contains_key("keep"));
+
+        let reloaded_state = load_state().expect("reload state after screen load");
+        let reloaded_providers = ProviderService::list(&reloaded_state, AppType::OpenClaw)
+            .expect("list providers after reload");
+        let reloaded_saved_only = reloaded_providers
+            .get("saved-only")
+            .expect("saved-only row should remain persisted after mirror sync");
+        assert_eq!(reloaded_saved_only.name, "Saved Only");
+        assert_eq!(reloaded_saved_only.notes.as_deref(), Some("keep this note"));
+    }
+
+    #[test]
+    #[serial]
+    fn load_providers_openclaw_keeps_saved_snapshot_rows_when_live_config_is_missing() {
+        let _guard = lock_test_home_and_settings();
+        let temp = tempdir().expect("create tempdir");
+        let openclaw_dir = temp.path().join(".openclaw");
+        std::fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+        let _home = HomeGuard::set(temp.path());
+        let _settings = SettingsGuard::with_openclaw_dir(&openclaw_dir);
+
+        let state = load_state().expect("load state");
+        {
+            let mut config = state.config.write().expect("lock config");
+            let manager = config
+                .get_manager_mut(&AppType::OpenClaw)
+                .expect("openclaw manager");
+            manager.providers.insert(
+                "saved-only".to_string(),
+                Provider::with_id(
+                    "saved-only".to_string(),
+                    "Saved Only".to_string(),
+                    json!({
+                        "baseUrl": "https://saved.example.com/v1",
+                        "models": [
+                            {"id": "saved-model", "name": "Saved Model"}
+                        ]
+                    }),
+                    None,
+                ),
+            );
+        }
+        state.save().expect("persist saved snapshot provider");
+
+        let openclaw_path = crate::openclaw_config::get_openclaw_config_path();
+        assert!(
+            !openclaw_path.exists(),
+            "precondition: openclaw.json should be absent for this regression test"
+        );
+
+        let snapshot = load_providers(&state, &AppType::OpenClaw).expect("load openclaw rows");
+        assert!(
+            snapshot.rows.iter().any(|row| row.id == "saved-only"),
+            "opening the OpenClaw screen should not purge saved metadata when openclaw.json is missing"
+        );
+
+        let providers =
+            ProviderService::list(&state, AppType::OpenClaw).expect("list providers after load");
+        assert!(
+            providers.contains_key("saved-only"),
+            "missing openclaw.json should leave the mirrored saved provider metadata intact"
+        );
+    }
+
+    #[test]
+    fn provider_display_name_openclaw_prefers_saved_name_over_primary_model_name() {
+        let row = ProviderRow {
+            id: "shared-id".to_string(),
+            provider: Provider::with_id(
+                "shared-id".to_string(),
+                "Saved Snapshot Name".to_string(),
+                json!({
+                    "models": [
+                        {"id": "live-model", "name": "Live Model Name"}
+                    ]
+                }),
+                None,
+            ),
+            api_url: Some("https://live.example.com/v1".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("live-model".to_string()),
+            default_model_id: None,
+        };
+
+        assert_eq!(
+            provider_display_name(&AppType::OpenClaw, &row),
+            "Saved Snapshot Name"
+        );
+        assert_eq!(row.provider.name, "Saved Snapshot Name");
+    }
+
+    #[test]
+    fn provider_display_name_openclaw_falls_back_to_provider_id_when_name_is_blank() {
+        let row = ProviderRow {
+            id: "shared-id".to_string(),
+            provider: Provider::with_id(
+                "shared-id".to_string(),
+                "   ".to_string(),
+                json!({
+                    "models": [
+                        {"id": "live-model", "name": "Live Model Name"}
+                    ]
+                }),
+                None,
+            ),
+            api_url: Some("https://live.example.com/v1".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: Some("live-model".to_string()),
+            default_model_id: None,
+        };
+
+        assert_eq!(provider_display_name(&AppType::OpenClaw, &row), "shared-id");
+    }
+
+    #[test]
+    fn provider_display_name_keeps_saved_name_for_non_openclaw_rows() {
+        let row = ProviderRow {
+            id: "shared-id".to_string(),
+            provider: Provider::with_id(
+                "shared-id".to_string(),
+                "Saved Snapshot Name".to_string(),
+                json!({
+                    "models": [
+                        {"id": "other-model", "name": "Should Not Leak"}
+                    ]
+                }),
+                None,
+            ),
+            api_url: Some("https://example.com/v1".to_string()),
+            is_current: false,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
+        };
+
+        assert_eq!(
+            provider_display_name(&AppType::Claude, &row),
+            "Saved Snapshot Name"
         );
     }
 }

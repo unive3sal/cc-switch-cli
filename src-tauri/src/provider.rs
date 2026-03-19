@@ -195,7 +195,11 @@ pub struct ProviderProxyConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ProviderMeta {
     /// 是否在写入 live 配置时合并通用配置片段
-    #[serde(rename = "applyCommonConfig", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "commonConfigEnabled",
+        alias = "applyCommonConfig",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub apply_common_config: Option<bool>,
     /// Codex 官方供应商标记（官方无需填写 API Key，使用 codex login 凭证）
     #[serde(rename = "codexOfficial", skip_serializing_if = "Option::is_none")]
@@ -306,4 +310,71 @@ pub struct OpenCodeModelLimit {
     pub context: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenClawProviderConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<OpenClawModelEntry>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub headers: HashMap<String, String>,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenClawModelEntry {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cost: Option<OpenClawModelCost>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OpenClawModelCost {
+    pub input: f64,
+    pub output: f64,
+    #[serde(flatten, default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra: HashMap<String, Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderMeta;
+
+    #[test]
+    fn provider_meta_serializes_upstream_common_config_key_and_accepts_legacy_alias() {
+        let meta = ProviderMeta {
+            apply_common_config: Some(true),
+            ..Default::default()
+        };
+
+        let serialized = serde_json::to_value(&meta).expect("serialize provider meta");
+        assert_eq!(serialized["commonConfigEnabled"], true);
+        assert!(
+            serialized.get("applyCommonConfig").is_none(),
+            "serialization should prefer the upstream key name"
+        );
+
+        let deserialized: ProviderMeta = serde_json::from_value(serde_json::json!({
+            "applyCommonConfig": false
+        }))
+        .expect("deserialize legacy alias");
+        assert_eq!(deserialized.apply_common_config, Some(false));
+    }
 }

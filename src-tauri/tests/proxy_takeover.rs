@@ -948,8 +948,8 @@ async fn app_state_try_new_restores_codex_from_current_provider_and_removes_stal
         "startup recovery should restore the current Codex provider config"
     );
     assert!(
-        restored_config.contains("disable_response_storage = true"),
-        "startup recovery should preserve Codex common snippet semantics on current-provider restore"
+        !restored_config.contains("disable_response_storage = true"),
+        "startup recovery should not auto-merge the Codex common snippet for a clean current-provider restore"
     );
     assert!(
         !restored_config.contains("127.0.0.1"),

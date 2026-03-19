@@ -341,6 +341,20 @@ fn model_fetch_target(
                 })?,
             strategy: ProviderModelFetchStrategy::Bearer,
         }),
+        AppType::OpenClaw => Ok(ModelFetchTarget {
+            base_url,
+            auth_value: provider
+                .settings_config
+                .get("apiKey")
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    AppError::Message(format!("Missing API key for provider '{}'", provider.id))
+                })?,
+            strategy: ProviderModelFetchStrategy::Bearer,
+        }),
     }
 }
 

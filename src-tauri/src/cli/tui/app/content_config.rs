@@ -1,8 +1,22 @@
 use super::*;
 
 impl App {
+    fn open_openclaw_editor<T: serde::Serialize>(
+        &mut self,
+        title: &'static str,
+        section: Option<&T>,
+        submit: EditorSubmit,
+    ) {
+        let initial = section
+            .map(|section| {
+                serde_json::to_string_pretty(section).unwrap_or_else(|_| "{}".to_string())
+            })
+            .unwrap_or_else(|| "{}".to_string());
+        self.open_editor(title, EditorKind::Json, initial, submit);
+    }
+
     pub(crate) fn on_config_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
-        let items = visible_config_items(&self.filter);
+        let items = visible_config_items(&self.filter, &self.app_type);
         match key.code {
             KeyCode::Up => {
                 self.config_idx = self.config_idx.saturating_sub(1);
@@ -93,6 +107,12 @@ impl App {
                         Action::None
                     }
                     ConfigItem::Proxy => Action::ConfigOpenProxyHelp,
+                    ConfigItem::OpenClawEnv
+                    | ConfigItem::OpenClawTools
+                    | ConfigItem::OpenClawAgents => self.push_route_and_switch(
+                        item.detail_route()
+                            .expect("OpenClaw config item should define a detail route"),
+                    ),
                     ConfigItem::WebDavSync => self.push_route_and_switch(Route::ConfigWebDav),
                     ConfigItem::Reset => {
                         self.overlay = Overlay::Confirm(ConfirmOverlay {
@@ -103,6 +123,48 @@ impl App {
                         Action::None
                     }
                 }
+            }
+            _ => Action::None,
+        }
+    }
+
+    pub(crate) fn on_config_openclaw_env_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('e') => {
+                self.open_openclaw_editor(
+                    texts::tui_openclaw_config_env_editor_title(),
+                    data.config.openclaw_env.as_ref(),
+                    EditorSubmit::ConfigOpenClawEnv,
+                );
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    pub(crate) fn on_config_openclaw_tools_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('e') => {
+                self.open_openclaw_editor(
+                    texts::tui_openclaw_config_tools_editor_title(),
+                    data.config.openclaw_tools.as_ref(),
+                    EditorSubmit::ConfigOpenClawTools,
+                );
+                Action::None
+            }
+            _ => Action::None,
+        }
+    }
+
+    pub(crate) fn on_config_openclaw_agents_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        match key.code {
+            KeyCode::Enter | KeyCode::Char('e') => {
+                self.open_openclaw_editor(
+                    texts::tui_openclaw_config_agents_editor_title(),
+                    data.config.openclaw_agents_defaults.as_ref(),
+                    EditorSubmit::ConfigOpenClawAgents,
+                );
+                Action::None
             }
             _ => Action::None,
         }

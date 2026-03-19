@@ -10,6 +10,7 @@ const DRACULA_PINK: (u8, u8, u8) = (255, 121, 198);
 const DRACULA_ORANGE: (u8, u8, u8) = (255, 184, 108);
 const DRACULA_YELLOW: (u8, u8, u8) = (241, 250, 140);
 const DRACULA_RED: (u8, u8, u8) = (255, 85, 85);
+const OPENCLAW_CORAL: (u8, u8, u8) = (255, 79, 64);
 const DRACULA_COMMENT: (u8, u8, u8) = (98, 114, 164);
 const DRACULA_SURFACE: (u8, u8, u8) = (68, 71, 90);
 
@@ -195,6 +196,7 @@ fn accent_rgb(app: &AppType) -> (u8, u8, u8) {
         AppType::Claude => DRACULA_CYAN,
         AppType::Gemini => DRACULA_PINK,
         AppType::OpenCode => DRACULA_ORANGE,
+        AppType::OpenClaw => OPENCLAW_CORAL,
     }
 }
 
@@ -267,6 +269,23 @@ mod tests {
         let codex = theme_for(&AppType::Codex);
 
         assert_ne!(opencode.accent, codex.accent);
+    }
+
+    #[test]
+    fn openclaw_theme_uses_distinct_upstream_aligned_accent() {
+        let _lock = env_lock().lock().expect("env lock poisoned");
+        let _no_color = EnvGuard::remove("NO_COLOR");
+        let _color_mode = EnvGuard::remove(COLOR_MODE_ENV);
+        let _colorterm = EnvGuard::set("COLORTERM", "truecolor");
+        let _term = EnvGuard::set("TERM", "xterm-256color");
+
+        let openclaw = theme_for(&AppType::OpenClaw);
+        let opencode = theme_for(&AppType::OpenCode);
+        let codex = theme_for(&AppType::Codex);
+
+        assert_eq!(openclaw.accent, Color::Rgb(255, 79, 64));
+        assert_ne!(openclaw.accent, opencode.accent);
+        assert_ne!(openclaw.accent, codex.accent);
     }
 
     #[test]

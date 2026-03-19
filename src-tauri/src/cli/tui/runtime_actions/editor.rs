@@ -4,6 +4,10 @@ use crate::app_config::{AppType, McpServer};
 use crate::cli::i18n::texts;
 use crate::cli::tui::form::strip_common_config_from_settings;
 use crate::error::AppError;
+use crate::openclaw_config::{
+    set_agents_defaults, set_env_config, set_tools_config, OpenClawAgentsDefaults,
+    OpenClawEnvConfig, OpenClawToolsConfig,
+};
 use crate::provider::Provider;
 use crate::services::{McpService, PromptService, ProviderService};
 use crate::settings::{set_webdav_sync_settings, WebDavSyncSettings};
@@ -28,6 +32,9 @@ pub(super) fn submit(
     match submit {
         EditorSubmit::PromptEdit { id } => submit_prompt_edit(ctx, id, content),
         EditorSubmit::ProviderFormApplyJson => submit_provider_form_apply_json(ctx, content),
+        EditorSubmit::ProviderFormApplyOpenClawModels => {
+            submit_provider_form_apply_openclaw_models(ctx, content)
+        }
         EditorSubmit::ProviderFormApplyCodexAuth => {
             submit_provider_form_apply_codex_auth(ctx, content)
         }
@@ -41,8 +48,86 @@ pub(super) fn submit(
         EditorSubmit::ConfigCommonSnippet { app_type } => {
             submit_config_common_snippet(ctx, app_type, content)
         }
+        EditorSubmit::ConfigOpenClawEnv => submit_openclaw_env(ctx, content),
+        EditorSubmit::ConfigOpenClawTools => submit_openclaw_tools(ctx, content),
+        EditorSubmit::ConfigOpenClawAgents => submit_openclaw_agents(ctx, content),
         EditorSubmit::ConfigWebDavSettings => submit_webdav_settings(ctx, content),
     }
+}
+
+fn submit_openclaw_env(
+    ctx: &mut RuntimeActionContext<'_>,
+    content: String,
+) -> Result<(), AppError> {
+    let env: OpenClawEnvConfig = match serde_json::from_str(&content) {
+        Ok(env) => env,
+        Err(err) => {
+            ctx.app.push_toast(
+                texts::tui_toast_invalid_json(&err.to_string()),
+                ToastKind::Error,
+            );
+            return Ok(());
+        }
+    };
+
+    set_env_config(&env)?;
+    ctx.app.editor = None;
+    ctx.app.push_toast(
+        texts::tui_toast_openclaw_config_saved(texts::tui_config_item_openclaw_env()),
+        ToastKind::Success,
+    );
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    Ok(())
+}
+
+fn submit_openclaw_tools(
+    ctx: &mut RuntimeActionContext<'_>,
+    content: String,
+) -> Result<(), AppError> {
+    let tools: OpenClawToolsConfig = match serde_json::from_str(&content) {
+        Ok(tools) => tools,
+        Err(err) => {
+            ctx.app.push_toast(
+                texts::tui_toast_invalid_json(&err.to_string()),
+                ToastKind::Error,
+            );
+            return Ok(());
+        }
+    };
+
+    set_tools_config(&tools)?;
+    ctx.app.editor = None;
+    ctx.app.push_toast(
+        texts::tui_toast_openclaw_config_saved(texts::tui_config_item_openclaw_tools()),
+        ToastKind::Success,
+    );
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    Ok(())
+}
+
+fn submit_openclaw_agents(
+    ctx: &mut RuntimeActionContext<'_>,
+    content: String,
+) -> Result<(), AppError> {
+    let defaults: OpenClawAgentsDefaults = match serde_json::from_str(&content) {
+        Ok(defaults) => defaults,
+        Err(err) => {
+            ctx.app.push_toast(
+                texts::tui_toast_invalid_json(&err.to_string()),
+                ToastKind::Error,
+            );
+            return Ok(());
+        }
+    };
+
+    set_agents_defaults(&defaults)?;
+    ctx.app.editor = None;
+    ctx.app.push_toast(
+        texts::tui_toast_openclaw_config_saved(texts::tui_config_item_openclaw_agents_defaults()),
+        ToastKind::Success,
+    );
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    Ok(())
 }
 
 fn submit_prompt_edit(
@@ -133,6 +218,41 @@ fn submit_provider_form_apply_json(
             return Ok(());
         }
     }
+    ctx.app.editor = None;
+    Ok(())
+}
+
+fn submit_provider_form_apply_openclaw_models(
+    ctx: &mut RuntimeActionContext<'_>,
+    content: String,
+) -> Result<(), AppError> {
+    let models_value: Value = match serde_json::from_str(&content) {
+        Ok(value) => value,
+        Err(e) => {
+            ctx.app.push_toast(
+                texts::tui_toast_invalid_json(&e.to_string()),
+                ToastKind::Error,
+            );
+            return Ok(());
+        }
+    };
+
+    if !models_value.is_array() {
+        ctx.app
+            .push_toast(texts::tui_toast_json_must_be_array(), ToastKind::Error);
+        return Ok(());
+    }
+
+    let apply_result = match ctx.app.form.as_mut() {
+        Some(FormState::ProviderAdd(form)) => form.apply_openclaw_models_value(models_value),
+        _ => Ok(()),
+    };
+
+    if let Err(err) = apply_result {
+        ctx.app.push_toast(err, ToastKind::Error);
+        return Ok(());
+    }
+
     ctx.app.editor = None;
     Ok(())
 }
@@ -342,7 +462,9 @@ fn submit_provider_edit(
     }
 
     let state = load_state()?;
-    if let Err(err) = ProviderService::update(&state, ctx.app.app_type.clone(), provider) {
+    let result = ProviderService::update(&state, ctx.app.app_type.clone(), provider);
+
+    if let Err(err) = result {
         ctx.app.push_toast(err.to_string(), ToastKind::Error);
         return Ok(());
     }
@@ -356,7 +478,6 @@ fn submit_provider_edit(
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     Ok(())
 }
-
 fn submit_mcp_add(ctx: &mut RuntimeActionContext<'_>, content: String) -> Result<(), AppError> {
     let server: McpServer = match serde_json::from_str(&content) {
         Ok(s) => s,
@@ -538,29 +659,50 @@ fn submit_webdav_settings(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use serial_test::serial;
+    use std::collections::HashMap;
     use std::ffi::OsString;
     use std::path::Path;
+    use tempfile::{tempdir, TempDir};
 
-    use serial_test::serial;
-    use tempfile::TempDir;
-
-    use super::*;
-    use crate::cli::tui::app::{App, Toast};
+    use crate::app_config::AppType;
+    use crate::cli::tui::app::{Action, App, Focus, Toast};
+    use crate::cli::tui::route::Route;
     use crate::cli::tui::runtime_systems::RequestTracker;
     use crate::cli::tui::terminal::TuiTerminal;
+    use crate::openclaw_config::{write_openclaw_config_source, OpenClawModelCatalogEntry};
+    use crate::settings::{get_settings, update_settings, AppSettings};
+    use crate::test_support::{
+        lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
+    };
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
 
     struct EnvGuard {
+        _lock: TestHomeSettingsLock,
         old_home: Option<OsString>,
         old_userprofile: Option<OsString>,
     }
 
     impl EnvGuard {
         fn set_home(home: &Path) -> Self {
+            let lock = lock_test_home_and_settings();
             let old_home = std::env::var_os("HOME");
             let old_userprofile = std::env::var_os("USERPROFILE");
             std::env::set_var("HOME", home);
             std::env::set_var("USERPROFILE", home);
+            set_test_home_override(Some(home));
+            crate::settings::reload_test_settings();
             Self {
+                _lock: lock,
                 old_home,
                 old_userprofile,
             }
@@ -577,67 +719,80 @@ mod tests {
                 Some(value) => std::env::set_var("USERPROFILE", value),
                 None => std::env::remove_var("USERPROFILE"),
             }
+            set_test_home_override(self.old_home.as_deref().map(Path::new));
+            crate::settings::reload_test_settings();
         }
     }
 
-    fn runtime_ctx(
-        app_type: AppType,
-    ) -> (
-        TempDir,
-        EnvGuard,
-        TuiTerminal,
-        App,
-        UiData,
-        RequestTracker,
-        RequestTracker,
-        RequestTracker,
-    ) {
+    struct SettingsGuard {
+        previous: AppSettings,
+    }
+
+    impl SettingsGuard {
+        fn with_openclaw_dir(path: &Path) -> Self {
+            let previous = get_settings();
+            let mut settings = AppSettings::default();
+            settings.openclaw_config_dir = Some(path.display().to_string());
+            update_settings(settings).expect("set openclaw override dir");
+            Self { previous }
+        }
+    }
+
+    impl Drop for SettingsGuard {
+        fn drop(&mut self) {
+            update_settings(self.previous.clone()).expect("restore previous settings");
+        }
+    }
+
+    struct RuntimeCtxFixture {
+        _temp_home: TempDir,
+        _env: EnvGuard,
+        terminal: TuiTerminal,
+        app: App,
+        data: UiData,
+        proxy_loading: RequestTracker,
+        webdav_loading: RequestTracker,
+        update_check: RequestTracker,
+    }
+
+    fn runtime_ctx(app_type: AppType) -> RuntimeCtxFixture {
         let temp_home = TempDir::new().expect("create temp home");
         let env = EnvGuard::set_home(temp_home.path());
 
         let terminal = TuiTerminal::new_for_test().expect("create test terminal");
         let app = App::new(Some(app_type.clone()));
         let data = UiData::load(&app_type).expect("load ui data");
-        (
-            temp_home,
-            env,
+        RuntimeCtxFixture {
+            _temp_home: temp_home,
+            _env: env,
             terminal,
             app,
             data,
-            RequestTracker::default(),
-            RequestTracker::default(),
-            RequestTracker::default(),
-        )
+            proxy_loading: RequestTracker::default(),
+            webdav_loading: RequestTracker::default(),
+            update_check: RequestTracker::default(),
+        }
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn submit_provider_add_generates_id_when_name_is_valid() {
-        let (
-            _temp_home,
-            _env,
-            mut terminal,
-            mut app,
-            mut data,
-            mut proxy_loading,
-            mut webdav_loading,
-            mut update_check,
-        ) = runtime_ctx(AppType::Claude);
+        let mut fixture = runtime_ctx(AppType::Claude);
 
         let mut ctx = RuntimeActionContext {
-            terminal: &mut terminal,
-            app: &mut app,
-            data: &mut data,
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
             speedtest_req_tx: None,
             stream_check_req_tx: None,
             skills_req_tx: None,
             proxy_req_tx: None,
-            proxy_loading: &mut proxy_loading,
+            proxy_loading: &mut fixture.proxy_loading,
             local_env_req_tx: None,
             webdav_req_tx: None,
-            webdav_loading: &mut webdav_loading,
+            webdav_loading: &mut fixture.webdav_loading,
             update_req_tx: None,
-            update_check: &mut update_check,
+            update_check: &mut fixture.update_check,
             model_fetch_req_tx: None,
         };
 
@@ -660,33 +815,24 @@ mod tests {
     }
 
     #[test]
-    #[serial]
+    #[serial(home_settings)]
     fn submit_provider_add_rejects_name_that_cannot_generate_id() {
-        let (
-            _temp_home,
-            _env,
-            mut terminal,
-            mut app,
-            mut data,
-            mut proxy_loading,
-            mut webdav_loading,
-            mut update_check,
-        ) = runtime_ctx(AppType::Claude);
+        let mut fixture = runtime_ctx(AppType::Claude);
 
         let mut ctx = RuntimeActionContext {
-            terminal: &mut terminal,
-            app: &mut app,
-            data: &mut data,
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
             speedtest_req_tx: None,
             stream_check_req_tx: None,
             skills_req_tx: None,
             proxy_req_tx: None,
-            proxy_loading: &mut proxy_loading,
+            proxy_loading: &mut fixture.proxy_loading,
             local_env_req_tx: None,
             webdav_req_tx: None,
-            webdav_loading: &mut webdav_loading,
+            webdav_loading: &mut fixture.webdav_loading,
             update_req_tx: None,
-            update_check: &mut update_check,
+            update_check: &mut fixture.update_check,
             model_fetch_req_tx: None,
         };
 
@@ -712,34 +858,20 @@ mod tests {
     }
 
     #[test]
-    #[serial]
-    fn submit_provider_form_apply_json_keeps_common_snippet_out_of_raw_submit_payload() {
-        let (
-            _temp_home,
-            _env,
-            mut terminal,
-            mut app,
-            mut data,
-            mut proxy_loading,
-            mut webdav_loading,
-            mut update_check,
-        ) = runtime_ctx(AppType::Claude);
+    #[serial(home_settings)]
+    fn submit_provider_add_preserves_custom_openclaw_name_after_reload() {
+        let home_dir = tempdir().expect("create temp home");
+        let openclaw_dir = tempdir().expect("create temp openclaw dir");
+        let _home = EnvGuard::set_home(home_dir.path());
+        let _settings = SettingsGuard::with_openclaw_dir(openclaw_dir.path());
 
-        data.config.common_snippet = r#"{
-            "alwaysThinkingEnabled": false,
-            "env": {
-                "COMMON_FLAG": "1"
-            }
-        }"#
-        .to_string();
+        let mut terminal = TuiTerminal::new_for_test().expect("create test terminal");
+        let mut app = App::new(Some(AppType::OpenClaw));
+        let mut data = UiData::load(&AppType::OpenClaw).expect("load openclaw ui data");
 
-        let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
-        form.id.set("p1");
-        form.name.set("Provider One");
-        form.include_common_config = true;
-        form.claude_base_url.set("https://provider.example");
-        app.form = Some(FormState::ProviderAdd(form));
-
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
         let mut ctx = RuntimeActionContext {
             terminal: &mut terminal,
             app: &mut app,
@@ -754,6 +886,920 @@ mod tests {
             webdav_loading: &mut webdav_loading,
             update_req_tx: None,
             update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        submit_provider_add(
+            &mut ctx,
+            r#"{
+  "id": "",
+  "name": "Friendly OpenClaw",
+  "settingsConfig": {
+    "apiKey": "sk-friendly",
+    "baseUrl": "https://friendly.example/v1",
+    "models": [
+      { "id": "friendly-model", "name": "Friendly Model" }
+    ]
+  }
+}"#
+            .to_string(),
+        )
+        .expect("submit should succeed");
+
+        let refreshed = UiData::load(&AppType::OpenClaw).expect("reload openclaw ui data");
+        let refreshed_row = refreshed
+            .providers
+            .rows
+            .iter()
+            .find(|row| row.id == "friendly-openclaw")
+            .expect("provider row should still exist after reload");
+        assert_eq!(refreshed_row.provider.name, "Friendly OpenClaw");
+        assert!(
+            refreshed_row.provider.created_at.is_some(),
+            "adding an OpenClaw provider through the add flow should persist a user-touched marker"
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_provider_edit_updates_openclaw_live_backed_provider() {
+        let home_dir = tempdir().expect("create temp home");
+        let openclaw_dir = tempdir().expect("create temp openclaw dir");
+        let _home = EnvGuard::set_home(home_dir.path());
+        let _settings = SettingsGuard::with_openclaw_dir(openclaw_dir.path());
+
+        write_openclaw_config_source(
+            r#"{
+  models: {
+    mode: 'merge',
+    providers: {
+      'live-only': {
+        apiKey: 'sk-live-old',
+        baseUrl: 'https://live.old.example/v1',
+        models: [{ id: 'live-model-old', name: 'Live Model Old' }],
+      },
+    },
+  },
+}"#,
+        )
+        .expect("seed live-only openclaw provider");
+
+        let mut terminal = TuiTerminal::new_for_test().expect("create test terminal");
+        let mut app = App::new(Some(AppType::OpenClaw));
+        let mut data = UiData::load(&AppType::OpenClaw).expect("load openclaw ui data");
+        assert!(
+            data.providers
+                .rows
+                .iter()
+                .any(|row| row.id == "live-only" && row.is_saved && row.is_in_config),
+            "precondition: UI should mirror the live provider into the local manager before edit submit"
+        );
+
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        submit_provider_edit(
+            &mut ctx,
+            "live-only".to_string(),
+            r#"{
+  "id": "live-only",
+  "name": "Live Only Imported",
+  "settingsConfig": {
+    "apiKey": "sk-live-new",
+    "baseUrl": "https://live.new.example/v1",
+    "models": [
+      { "id": "live-model-new", "name": "Live Model New" }
+    ]
+  }
+}"#
+            .to_string(),
+        )
+        .expect("submit should succeed");
+
+        let refreshed = UiData::load(&AppType::OpenClaw).expect("reload openclaw ui data");
+        assert!(
+            refreshed
+                .providers
+                .rows
+                .iter()
+                .any(|row| row.id == "live-only" && row.is_saved && row.is_in_config),
+            "editing an OpenClaw provider should keep the mirrored row in sync"
+        );
+        assert_eq!(
+            crate::openclaw_config::get_provider("live-only")
+                .expect("read rewritten live provider")
+                .and_then(|provider| provider
+                    .get("baseUrl")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)),
+            Some("https://live.new.example/v1".to_string())
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_provider_edit_preserves_custom_openclaw_name_after_reload() {
+        let home_dir = tempdir().expect("create temp home");
+        let openclaw_dir = tempdir().expect("create temp openclaw dir");
+        let _home = EnvGuard::set_home(home_dir.path());
+        let _settings = SettingsGuard::with_openclaw_dir(openclaw_dir.path());
+
+        write_openclaw_config_source(
+            r#"{
+  models: {
+    mode: 'merge',
+    providers: {
+      'live-only': {
+        apiKey: 'sk-live',
+        baseUrl: 'https://live.example/v1',
+        models: [{ id: 'live-model', name: 'Live Model' }],
+      },
+    },
+  },
+}"#,
+        )
+        .expect("seed live-only openclaw provider");
+
+        let mut terminal = TuiTerminal::new_for_test().expect("create test terminal");
+        let mut app = App::new(Some(AppType::OpenClaw));
+        let mut data = UiData::load(&AppType::OpenClaw).expect("load openclaw ui data");
+        let initial_row = data
+            .providers
+            .rows
+            .iter()
+            .find(|row| row.id == "live-only")
+            .expect("mirrored provider row should exist before edit");
+        assert_eq!(initial_row.provider.name, "live-only");
+        assert!(initial_row.provider.created_at.is_none());
+
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        submit_provider_edit(
+            &mut ctx,
+            "live-only".to_string(),
+            r#"{
+  "id": "live-only",
+  "name": "Live Only Custom",
+  "meta": {
+    "applyCommonConfig": false
+  },
+  "settingsConfig": {
+    "apiKey": "sk-live",
+    "baseUrl": "https://live.example/v1",
+    "models": [
+      { "id": "live-model", "name": "Live Model" }
+    ]
+  }
+}"#
+            .to_string(),
+        )
+        .expect("submit should succeed");
+
+        let refreshed = UiData::load(&AppType::OpenClaw).expect("reload openclaw ui data");
+        let refreshed_row = refreshed
+            .providers
+            .rows
+            .iter()
+            .find(|row| row.id == "live-only")
+            .expect("provider row should still exist after reload");
+        assert_eq!(refreshed_row.provider.name, "Live Only Custom");
+        assert!(
+            refreshed_row.provider.created_at.is_some(),
+            "saving a mirrored OpenClaw provider through the edit flow should persist a user-touched marker"
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_provider_edit_hides_saved_only_openclaw_snapshot_rows() {
+        let home_dir = tempdir().expect("create temp home");
+        let openclaw_dir = tempdir().expect("create temp openclaw dir");
+        let _home = EnvGuard::set_home(home_dir.path());
+        let _settings = SettingsGuard::with_openclaw_dir(openclaw_dir.path());
+
+        write_openclaw_config_source(
+            r#"{
+  models: {
+    mode: 'merge',
+    providers: {
+      keep: {
+        apiKey: 'sk-keep',
+        baseUrl: 'https://keep.example/v1',
+        models: [{ id: 'keep-model' }],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: {
+        primary: 'keep/keep-model',
+      },
+    },
+  },
+}"#,
+        )
+        .expect("seed unrelated live openclaw provider");
+
+        let state = load_state().expect("load state");
+        {
+            let mut config = state.config.write().expect("lock config");
+            let manager = config
+                .get_manager_mut(&AppType::OpenClaw)
+                .expect("openclaw manager");
+            manager.providers.insert(
+                "saved-only".to_string(),
+                Provider::with_id(
+                    "saved-only".to_string(),
+                    "Saved Only".to_string(),
+                    json!({
+                        "apiKey": "sk-saved-old",
+                        "baseUrl": "https://saved.old.example/v1",
+                        "models": [{ "id": "saved-model-old" }]
+                    }),
+                    None,
+                ),
+            );
+        }
+        state.save().expect("persist saved-only provider snapshot");
+
+        let data = UiData::load(&AppType::OpenClaw).expect("load openclaw ui data");
+        assert!(
+            data.providers.rows.iter().all(|row| row.id != "saved-only"),
+            "saved-only snapshot rows should disappear once the OpenClaw manager mirrors live config"
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_provider_edit_rejects_invalid_usage_script_for_openclaw_provider() {
+        let home_dir = tempdir().expect("create temp home");
+        let openclaw_dir = tempdir().expect("create temp openclaw dir");
+        let _home = EnvGuard::set_home(home_dir.path());
+        let _settings = SettingsGuard::with_openclaw_dir(openclaw_dir.path());
+
+        write_openclaw_config_source(
+            r#"{
+  models: {
+    mode: 'merge',
+    providers: {
+      keep: {
+        apiKey: 'sk-keep',
+        baseUrl: 'https://keep.example/v1',
+        models: [{ id: 'keep-model' }],
+      },
+    },
+  },
+}"#,
+        )
+        .expect("seed unrelated live openclaw provider");
+
+        let state = load_state().expect("load state");
+        {
+            let mut config = state.config.write().expect("lock config");
+            let manager = config
+                .get_manager_mut(&AppType::OpenClaw)
+                .expect("openclaw manager");
+            manager.providers.insert(
+                "keep".to_string(),
+                Provider::with_id(
+                    "keep".to_string(),
+                    "Keep".to_string(),
+                    json!({
+                        "apiKey": "sk-keep",
+                        "baseUrl": "https://keep.example/v1",
+                        "models": [{ "id": "keep-model" }]
+                    }),
+                    None,
+                ),
+            );
+        }
+        state.save().expect("persist mirrored provider state");
+
+        let original_live =
+            std::fs::read_to_string(crate::openclaw_config::get_openclaw_config_path())
+                .expect("read original live config");
+        let mut terminal = TuiTerminal::new_for_test().expect("create test terminal");
+        let mut app = App::new(Some(AppType::OpenClaw));
+        let mut data = UiData::load(&AppType::OpenClaw).expect("load openclaw ui data");
+        assert!(
+            data.providers
+                .rows
+                .iter()
+                .any(|row| row.id == "keep" && row.is_saved && row.is_in_config),
+            "precondition: UI should expose the mirrored provider before edit submit"
+        );
+
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        submit_provider_edit(
+            &mut ctx,
+            "keep".to_string(),
+            r#"{
+  "id": "keep",
+  "name": "Keep Invalid",
+  "settingsConfig": {
+    "apiKey": "sk-keep-new",
+    "baseUrl": "https://keep.new.example/v1",
+    "models": [
+      { "id": "keep-model-new" }
+    ]
+  },
+  "meta": {
+    "usage_script": {
+      "enabled": true,
+      "language": "javascript",
+      "code": "return { success: true, data: [] };",
+      "autoQueryInterval": 1441
+    }
+  }
+}"#
+            .to_string(),
+        )
+        .expect("submit should return without crashing");
+
+        assert!(matches!(
+            ctx.app.toast.as_ref(),
+            Some(Toast {
+                kind: ToastKind::Error,
+                ..
+            })
+        ));
+        assert!(
+            ctx.app
+                .toast
+                .as_ref()
+                .is_some_and(|toast| toast.message.contains("1440")),
+            "OpenClaw edits should surface usage_script validation errors"
+        );
+
+        let refreshed = UiData::load(&AppType::OpenClaw).expect("reload openclaw ui data");
+        let saved_row = refreshed
+            .providers
+            .rows
+            .iter()
+            .find(|row| row.id == "keep")
+            .expect("provider row should still exist");
+        assert_eq!(saved_row.provider.name, "Keep");
+        assert_eq!(
+            saved_row.provider.settings_config["baseUrl"],
+            json!("https://keep.example/v1"),
+            "invalid OpenClaw edits should not persist the attempted provider update"
+        );
+        let live_after =
+            std::fs::read_to_string(crate::openclaw_config::get_openclaw_config_path())
+                .expect("read live config after rejected saved-only edit");
+        assert_eq!(
+            live_after, original_live,
+            "rejected OpenClaw edits should leave openclaw.json untouched"
+        );
+    }
+
+    fn run_openclaw_editor_submit_flow(
+        route: Route,
+        open_key: KeyEvent,
+        initial_source: &str,
+        expected_submit: EditorSubmit,
+        expected_initial_warning: &str,
+        edited_content: &str,
+    ) -> Result<(App, UiData), AppError> {
+        let home_dir = tempdir().expect("create temp home");
+        let openclaw_dir = tempdir().expect("create temp openclaw dir");
+        let _home = EnvGuard::set_home(home_dir.path());
+        let _settings = SettingsGuard::with_openclaw_dir(openclaw_dir.path());
+
+        write_openclaw_config_source(initial_source)?;
+
+        let mut terminal = TuiTerminal::new_for_test()?;
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = route;
+        app.focus = Focus::Content;
+        let mut data = UiData::load(&AppType::OpenClaw)?;
+        assert!(data
+            .config
+            .openclaw_warnings
+            .as_ref()
+            .is_some_and(|warnings| warnings
+                .iter()
+                .any(|warning| warning.code == expected_initial_warning)));
+
+        let open_action = app.on_key(open_key, &data);
+        assert!(matches!(open_action, Action::None));
+        assert!(matches!(
+            app.editor.as_ref().map(|editor| editor.submit.clone()),
+            Some(submit) if submit == expected_submit
+        ));
+
+        app.editor
+            .as_mut()
+            .expect("editor should be open")
+            .replace_text(edited_content);
+
+        let submit_action = app.on_key(ctrl(KeyCode::Char('s')), &data);
+        let Action::EditorSubmit { submit, content } = submit_action else {
+            panic!("expected EditorSubmit action");
+        };
+
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        super::submit(&mut ctx, submit, content)?;
+        Ok((app, data))
+    }
+
+    fn run_openclaw_config_menu_submit_flow(
+        item: crate::cli::tui::app::ConfigItem,
+        expected_route: Route,
+        editor_open_key: KeyEvent,
+        initial_source: &str,
+        expected_submit: EditorSubmit,
+        expected_initial_warning: &str,
+        edited_content: &str,
+    ) -> Result<(App, UiData), AppError> {
+        let home_dir = tempdir().expect("create temp home");
+        let openclaw_dir = tempdir().expect("create temp openclaw dir");
+        let _home = EnvGuard::set_home(home_dir.path());
+        let _settings = SettingsGuard::with_openclaw_dir(openclaw_dir.path());
+
+        write_openclaw_config_source(initial_source)?;
+
+        let mut terminal = TuiTerminal::new_for_test()?;
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::Config;
+        app.focus = Focus::Content;
+        app.config_idx = crate::cli::tui::app::ConfigItem::ALL
+            .iter()
+            .filter(|candidate| candidate.visible_for_app(&app.app_type))
+            .position(|candidate| *candidate == item)
+            .expect("OpenClaw config item should be visible in config menu");
+        let mut data = UiData::load(&AppType::OpenClaw)?;
+        assert!(data
+            .config
+            .openclaw_warnings
+            .as_ref()
+            .is_some_and(|warnings| warnings
+                .iter()
+                .any(|warning| warning.code == expected_initial_warning)));
+
+        let route_action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(route_action, Action::SwitchRoute(actual) if actual == expected_route));
+        assert_eq!(app.route, expected_route);
+
+        let open_action = app.on_key(editor_open_key, &data);
+        assert!(matches!(open_action, Action::None));
+        assert!(matches!(
+            app.editor.as_ref().map(|editor| editor.submit.clone()),
+            Some(submit) if submit == expected_submit
+        ));
+
+        app.editor
+            .as_mut()
+            .expect("editor should be open")
+            .replace_text(edited_content);
+
+        let submit_action = app.on_key(ctrl(KeyCode::Char('s')), &data);
+        let Action::EditorSubmit { submit, content } = submit_action else {
+            panic!("expected EditorSubmit action");
+        };
+
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        super::submit(&mut ctx, submit, content)?;
+        Ok((app, data))
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_config_route_env_editor_submit_saves_and_reloads_ui_data() {
+        let initial_source = r#"{
+  env: {
+    vars: 'broken-env',
+  },
+}"#;
+        let edited_content = r#"{
+  "OPENCLAW_ENV_TOKEN": "fresh-token",
+  "OPENCLAW_TIMEOUT": 30
+}"#;
+
+        let (app, data) = run_openclaw_editor_submit_flow(
+            Route::ConfigOpenClawEnv,
+            key(KeyCode::Enter),
+            initial_source,
+            EditorSubmit::ConfigOpenClawEnv,
+            "stringified_env_vars",
+            edited_content,
+        )
+        .expect("env submit flow should succeed");
+
+        assert!(app.editor.is_none());
+        assert_eq!(
+            app.toast.as_ref().map(|toast| toast.message.as_str()),
+            Some(
+                texts::tui_toast_openclaw_config_saved(texts::tui_config_item_openclaw_env())
+                    .as_str()
+            )
+        );
+        assert_eq!(
+            data.config
+                .openclaw_env
+                .as_ref()
+                .and_then(|env| env.vars.get("OPENCLAW_ENV_TOKEN")),
+            Some(&Value::String("fresh-token".to_string()))
+        );
+        let warnings = data.config.openclaw_warnings.clone().unwrap_or_default();
+        assert!(!warnings
+            .iter()
+            .any(|warning| warning.code == "stringified_env_vars"));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_config_route_tools_editor_submit_saves_and_reloads_ui_data() {
+        let initial_source = r#"{
+  tools: {
+    profile: 'dangerous',
+    allow: ['Read'],
+  },
+}"#;
+        let edited_content = r#"{
+  "profile": "coding",
+  "allow": ["Read", "Write"],
+  "deny": ["Bash"]
+}"#;
+
+        let (app, data) = run_openclaw_editor_submit_flow(
+            Route::ConfigOpenClawTools,
+            key(KeyCode::Char('e')),
+            initial_source,
+            EditorSubmit::ConfigOpenClawTools,
+            "invalid_tools_profile",
+            edited_content,
+        )
+        .expect("tools submit flow should succeed");
+
+        assert!(app.editor.is_none());
+        assert_eq!(
+            app.toast.as_ref().map(|toast| toast.message.as_str()),
+            Some(
+                texts::tui_toast_openclaw_config_saved(texts::tui_config_item_openclaw_tools())
+                    .as_str()
+            )
+        );
+        assert_eq!(
+            data.config
+                .openclaw_tools
+                .as_ref()
+                .and_then(|tools| tools.profile.as_deref()),
+            Some("coding")
+        );
+        assert_eq!(
+            data.config
+                .openclaw_tools
+                .as_ref()
+                .map(|tools| tools.allow.clone()),
+            Some(vec!["Read".to_string(), "Write".to_string()])
+        );
+        let warnings = data.config.openclaw_warnings.clone().unwrap_or_default();
+        assert!(!warnings
+            .iter()
+            .any(|warning| warning.code == "invalid_tools_profile"));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_config_route_agents_editor_submit_saves_and_reloads_ui_data() {
+        let initial_source = r#"{
+  models: {
+    mode: 'merge',
+    providers: {
+      demo: {
+        models: [
+          { id: 'gpt-4.1' },
+          { id: 'gpt-4o-mini' },
+        ],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      timeout: 42,
+      model: {
+        primary: 'legacy-model',
+      },
+    },
+  },
+}"#;
+        let edited_content = r#"{
+  "model": {
+    "primary": "demo/gpt-4.1",
+    "fallbacks": ["demo/gpt-4o-mini"]
+  },
+  "models": {
+    "demo/gpt-4.1": {
+      "alias": "General"
+    }
+  }
+}"#;
+
+        let (app, data) = run_openclaw_editor_submit_flow(
+            Route::ConfigOpenClawAgents,
+            key(KeyCode::Enter),
+            initial_source,
+            EditorSubmit::ConfigOpenClawAgents,
+            "legacy_agents_timeout",
+            edited_content,
+        )
+        .expect("agents submit flow should succeed");
+
+        assert!(app.editor.is_none());
+        assert_eq!(
+            app.toast.as_ref().map(|toast| toast.message.as_str()),
+            Some(
+                texts::tui_toast_openclaw_config_saved(
+                    texts::tui_config_item_openclaw_agents_defaults()
+                )
+                .as_str()
+            )
+        );
+        assert_eq!(
+            data.config
+                .openclaw_agents_defaults
+                .as_ref()
+                .and_then(|defaults| defaults.model.as_ref())
+                .map(|model| model.primary.as_str()),
+            Some("demo/gpt-4.1")
+        );
+        assert_eq!(
+            data.config
+                .openclaw_agents_defaults
+                .as_ref()
+                .and_then(|defaults| defaults.models.as_ref())
+                .and_then(|models| models.get("demo/gpt-4.1")),
+            Some(&OpenClawModelCatalogEntry {
+                alias: Some("General".to_string()),
+                extra: HashMap::new(),
+            })
+        );
+        let warnings = data.config.openclaw_warnings.clone().unwrap_or_default();
+        assert!(!warnings
+            .iter()
+            .any(|warning| warning.code == "legacy_agents_timeout"));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_config_route_env_entry_from_config_menu_saves_and_clears_warning() {
+        let initial_source = r#"{
+  env: {
+    vars: 'broken-env',
+  },
+}"#;
+        let edited_content = r#"{
+  "OPENCLAW_ENV_TOKEN": "fresh-token"
+}"#;
+
+        let (app, data) = run_openclaw_config_menu_submit_flow(
+            crate::cli::tui::app::ConfigItem::OpenClawEnv,
+            Route::ConfigOpenClawEnv,
+            key(KeyCode::Enter),
+            initial_source,
+            EditorSubmit::ConfigOpenClawEnv,
+            "stringified_env_vars",
+            edited_content,
+        )
+        .expect("env config-menu flow should succeed");
+
+        assert!(app.editor.is_none());
+        assert_eq!(app.route, Route::ConfigOpenClawEnv);
+        assert_eq!(
+            data.config
+                .openclaw_env
+                .as_ref()
+                .and_then(|env| env.vars.get("OPENCLAW_ENV_TOKEN")),
+            Some(&Value::String("fresh-token".to_string()))
+        );
+        let warnings = data.config.openclaw_warnings.clone().unwrap_or_default();
+        assert!(!warnings
+            .iter()
+            .any(|warning| warning.code == "stringified_env_vars"));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_config_route_tools_entry_from_config_menu_saves_and_clears_warning() {
+        let initial_source = r#"{
+  tools: {
+    profile: 'dangerous',
+  },
+}"#;
+        let edited_content = r#"{
+  "profile": "coding",
+  "allow": ["Read"]
+}"#;
+
+        let (app, data) = run_openclaw_config_menu_submit_flow(
+            crate::cli::tui::app::ConfigItem::OpenClawTools,
+            Route::ConfigOpenClawTools,
+            key(KeyCode::Char('e')),
+            initial_source,
+            EditorSubmit::ConfigOpenClawTools,
+            "invalid_tools_profile",
+            edited_content,
+        )
+        .expect("tools config-menu flow should succeed");
+
+        assert!(app.editor.is_none());
+        assert_eq!(app.route, Route::ConfigOpenClawTools);
+        assert_eq!(
+            data.config
+                .openclaw_tools
+                .as_ref()
+                .and_then(|tools| tools.profile.as_deref()),
+            Some("coding")
+        );
+        let warnings = data.config.openclaw_warnings.clone().unwrap_or_default();
+        assert!(!warnings
+            .iter()
+            .any(|warning| warning.code == "invalid_tools_profile"));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn openclaw_config_route_agents_entry_from_config_menu_saves_and_clears_warning() {
+        let initial_source = r#"{
+  models: {
+    mode: 'merge',
+    providers: {
+      demo: {
+        models: [
+          { id: 'gpt-4.1' },
+        ],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      timeout: 42,
+      model: {
+        primary: 'legacy-model',
+      },
+    },
+  },
+}"#;
+        let edited_content = r#"{
+  "model": {
+    "primary": "demo/gpt-4.1"
+  }
+}"#;
+
+        let (app, data) = run_openclaw_config_menu_submit_flow(
+            crate::cli::tui::app::ConfigItem::OpenClawAgents,
+            Route::ConfigOpenClawAgents,
+            key(KeyCode::Enter),
+            initial_source,
+            EditorSubmit::ConfigOpenClawAgents,
+            "legacy_agents_timeout",
+            edited_content,
+        )
+        .expect("agents config-menu flow should succeed");
+
+        assert!(app.editor.is_none());
+        assert_eq!(app.route, Route::ConfigOpenClawAgents);
+        assert_eq!(
+            data.config
+                .openclaw_agents_defaults
+                .as_ref()
+                .and_then(|defaults| defaults.model.as_ref())
+                .map(|model| model.primary.as_str()),
+            Some("demo/gpt-4.1")
+        );
+        let warnings = data.config.openclaw_warnings.clone().unwrap_or_default();
+        assert!(!warnings
+            .iter()
+            .any(|warning| warning.code == "legacy_agents_timeout"));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn submit_provider_form_apply_json_keeps_common_snippet_out_of_raw_submit_payload() {
+        let mut fixture = runtime_ctx(AppType::Claude);
+
+        fixture.data.config.common_snippet = r#"{
+            "alwaysThinkingEnabled": false,
+            "env": {
+                "COMMON_FLAG": "1"
+            }
+        }"#
+        .to_string();
+
+        let mut form = crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude);
+        form.id.set("p1");
+        form.name.set("Provider One");
+        form.include_common_config = true;
+        form.claude_base_url.set("https://provider.example");
+        fixture.app.form = Some(FormState::ProviderAdd(form));
+
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut fixture.terminal,
+            app: &mut fixture.app,
+            data: &mut fixture.data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut fixture.proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut fixture.webdav_loading,
+            update_req_tx: None,
+            update_check: &mut fixture.update_check,
             model_fetch_req_tx: None,
         };
 

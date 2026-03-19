@@ -31,7 +31,7 @@ pub(super) struct SponsorProviderPreset {
     gemini_base_url: &'static str,
 }
 
-const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 2] = [
+static SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 2] = [
     SponsorProviderPreset {
         id: "packycode",
         provider_name: "PackyCode",
@@ -58,7 +58,7 @@ const SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 2] = [
     },
 ];
 
-const PROVIDER_TEMPLATE_DEFS_CLAUDE: [ProviderTemplateDef; 2] = [
+static PROVIDER_TEMPLATE_DEFS_CLAUDE: [ProviderTemplateDef; 2] = [
     ProviderTemplateDef {
         id: ProviderTemplateId::Custom,
         label: "Custom",
@@ -69,7 +69,7 @@ const PROVIDER_TEMPLATE_DEFS_CLAUDE: [ProviderTemplateDef; 2] = [
     },
 ];
 
-const PROVIDER_TEMPLATE_DEFS_CODEX: [ProviderTemplateDef; 2] = [
+static PROVIDER_TEMPLATE_DEFS_CODEX: [ProviderTemplateDef; 2] = [
     ProviderTemplateDef {
         id: ProviderTemplateId::Custom,
         label: "Custom",
@@ -80,7 +80,7 @@ const PROVIDER_TEMPLATE_DEFS_CODEX: [ProviderTemplateDef; 2] = [
     },
 ];
 
-const PROVIDER_TEMPLATE_DEFS_GEMINI: [ProviderTemplateDef; 2] = [
+static PROVIDER_TEMPLATE_DEFS_GEMINI: [ProviderTemplateDef; 2] = [
     ProviderTemplateDef {
         id: ProviderTemplateId::Custom,
         label: "Custom",
@@ -91,12 +91,17 @@ const PROVIDER_TEMPLATE_DEFS_GEMINI: [ProviderTemplateDef; 2] = [
     },
 ];
 
-const PROVIDER_TEMPLATE_DEFS_OPENCODE: [ProviderTemplateDef; 1] = [ProviderTemplateDef {
+static PROVIDER_TEMPLATE_DEFS_OPENCODE: [ProviderTemplateDef; 1] = [ProviderTemplateDef {
     id: ProviderTemplateId::Custom,
     label: "Custom",
 }];
 
-const NO_SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 0] = [];
+static PROVIDER_TEMPLATE_DEFS_OPENCLAW: [ProviderTemplateDef; 1] = [ProviderTemplateDef {
+    id: ProviderTemplateId::Custom,
+    label: "Custom",
+}];
+
+static NO_SPONSOR_PROVIDER_PRESETS: [SponsorProviderPreset; 0] = [];
 
 pub(super) fn provider_builtin_template_defs(app_type: &AppType) -> &'static [ProviderTemplateDef] {
     match app_type {
@@ -104,12 +109,14 @@ pub(super) fn provider_builtin_template_defs(app_type: &AppType) -> &'static [Pr
         AppType::Codex => &PROVIDER_TEMPLATE_DEFS_CODEX,
         AppType::Gemini => &PROVIDER_TEMPLATE_DEFS_GEMINI,
         AppType::OpenCode => &PROVIDER_TEMPLATE_DEFS_OPENCODE,
+        AppType::OpenClaw => &PROVIDER_TEMPLATE_DEFS_OPENCLAW,
     }
 }
 
 pub(super) fn provider_sponsor_presets(app_type: &AppType) -> &'static [SponsorProviderPreset] {
     match app_type {
         AppType::OpenCode => &NO_SPONSOR_PROVIDER_PRESETS,
+        AppType::OpenClaw => &NO_SPONSOR_PROVIDER_PRESETS,
         _ => &SPONSOR_PROVIDER_PRESETS,
     }
 }
@@ -161,6 +168,7 @@ impl ProviderAddFormState {
                     self.name = defaults.name;
                     self.website_url = defaults.website_url;
                     self.notes = defaults.notes;
+                    self.include_common_config = defaults.include_common_config;
                     self.json_scroll = defaults.json_scroll;
                     self.codex_preview_section = defaults.codex_preview_section;
                     self.codex_auth_scroll = defaults.codex_auth_scroll;
@@ -168,6 +176,7 @@ impl ProviderAddFormState {
                     self.claude_model_config_touched = defaults.claude_model_config_touched;
                     self.claude_api_key = defaults.claude_api_key;
                     self.claude_base_url = defaults.claude_base_url;
+                    self.claude_api_format = defaults.claude_api_format;
                     self.claude_model = defaults.claude_model;
                     self.claude_reasoning_model = defaults.claude_reasoning_model;
                     self.claude_haiku_model = defaults.claude_haiku_model;
@@ -183,6 +192,8 @@ impl ProviderAddFormState {
                     self.gemini_api_key = defaults.gemini_api_key;
                     self.gemini_base_url = defaults.gemini_base_url;
                     self.gemini_model = defaults.gemini_model;
+                    self.openclaw_user_agent = defaults.openclaw_user_agent;
+                    self.openclaw_models = defaults.openclaw_models;
                     self.opencode_npm_package = defaults.opencode_npm_package;
                     self.opencode_api_key = defaults.opencode_api_key;
                     self.opencode_base_url = defaults.opencode_base_url;
@@ -272,6 +283,7 @@ impl ProviderAddFormState {
                 self.gemini_base_url.set(preset.gemini_base_url);
             }
             AppType::OpenCode => {}
+            AppType::OpenClaw => {}
         }
     }
 }

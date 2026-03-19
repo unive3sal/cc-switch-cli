@@ -14,26 +14,32 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::error::AppError;
 
+type LiveTerminal = Terminal<CrosstermBackend<Stdout>>;
+
+type PanicHook = Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>;
+
+#[cfg(test)]
+type InMemoryTerminal = Terminal<TestBackend>;
+
+enum TerminalHandle {
+    Stdout(LiveTerminal),
+    #[cfg(test)]
+    Test(InMemoryTerminal),
+}
+
 pub struct TuiTerminal {
     terminal: TerminalHandle,
     active: bool,
 }
 
-enum TerminalHandle {
-    Stdout(Terminal<CrosstermBackend<Stdout>>),
-    #[cfg(test)]
-    Test(Terminal<TestBackend>),
-}
-
 pub struct PanicRestoreHookGuard {
-    previous: Option<Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static>>,
+    previous: Option<PanicHook>,
 }
 
 impl PanicRestoreHookGuard {
     pub fn install() -> Self {
         let previous = std::panic::take_hook();
-        let previous: Arc<dyn Fn(&std::panic::PanicHookInfo<'_>) + Send + Sync + 'static> =
-            previous.into();
+        let previous: PanicHook = previous.into();
         let previous_for_hook = previous.clone();
 
         std::panic::set_hook(Box::new(move |info| {
@@ -89,16 +95,18 @@ fn restore_stdout_best_effort(stdout: &mut Stdout) -> Result<(), AppError> {
     }
 }
 
+fn terminal_error(e: impl ToString) -> AppError {
+    AppError::localized(
+        "tui_terminal_error",
+        format!("终端错误: {}", e.to_string()),
+        format!("Terminal error: {}", e.to_string()),
+    )
+}
+
 impl TuiTerminal {
     pub fn new() -> Result<Self, AppError> {
         let mut stdout = io::stdout();
-        enable_raw_mode().map_err(|e| {
-            AppError::localized(
-                "tui_terminal_error",
-                format!("终端错误: {}", e.to_string()),
-                format!("Terminal error: {}", e.to_string()),
-            )
-        })?;
+        enable_raw_mode().map_err(terminal_error)?;
         if let Err(e) = execute!(
             stdout,
             EnterAlternateScreen,
@@ -106,24 +114,15 @@ impl TuiTerminal {
             cursor::Hide
         ) {
             let _ = restore_stdout_best_effort(&mut stdout);
-            return Err(AppError::localized(
-                "tui_terminal_error",
-                format!("终端错误: {}", e.to_string()),
-                format!("Terminal error: {}", e.to_string()),
-            ));
+            return Err(terminal_error(e));
         }
 
-        let backend = CrosstermBackend::new(stdout);
-        let terminal = match Terminal::new(backend) {
+        let terminal = match Terminal::new(CrosstermBackend::new(stdout)) {
             Ok(terminal) => terminal,
             Err(e) => {
                 let mut stdout = io::stdout();
                 let _ = restore_stdout_best_effort(&mut stdout);
-                return Err(AppError::localized(
-                    "tui_terminal_error",
-                    format!("终端错误: {}", e.to_string()),
-                    format!("Terminal error: {}", e.to_string()),
-                ));
+                return Err(terminal_error(e));
             }
         };
 
@@ -135,15 +134,11 @@ impl TuiTerminal {
 
     #[cfg(test)]
     pub(crate) fn new_for_test() -> Result<Self, AppError> {
-        // Use an in-memory backend so test helpers never compete for the real TTY.
-        let backend = TestBackend::new(120, 40);
-        let terminal = Terminal::new(backend).map_err(|e| {
-            AppError::localized(
-                "tui_terminal_error",
-                format!("终端错误: {}", e),
-                format!("Terminal error: {}", e),
-            )
-        })?;
+        const TEST_TERMINAL_WIDTH: u16 = 120;
+        const TEST_TERMINAL_HEIGHT: u16 = 40;
+
+        let backend = TestBackend::new(TEST_TERMINAL_WIDTH, TEST_TERMINAL_HEIGHT);
+        let terminal = Terminal::new(backend).expect("test terminal backend should be infallible");
 
         Ok(Self {
             terminal: TerminalHandle::Test(terminal),
@@ -156,13 +151,9 @@ impl TuiTerminal {
         F: FnOnce(&mut ratatui::Frame<'_>),
     {
         match &mut self.terminal {
-            TerminalHandle::Stdout(terminal) => terminal.draw(f).map(|_| ()).map_err(|e| {
-                AppError::localized(
-                    "tui_terminal_error",
-                    format!("终端错误: {}", e.to_string()),
-                    format!("Terminal error: {}", e.to_string()),
-                )
-            }),
+            TerminalHandle::Stdout(terminal) => {
+                terminal.draw(f).map(|_| ()).map_err(terminal_error)
+            }
             #[cfg(test)]
             TerminalHandle::Test(terminal) => terminal.draw(f).map(|_| ()).map_err(|e| match e {}),
         }
@@ -170,13 +161,7 @@ impl TuiTerminal {
 
     pub fn size(&self) -> Result<Size, AppError> {
         match &self.terminal {
-            TerminalHandle::Stdout(terminal) => terminal.size().map_err(|e| {
-                AppError::localized(
-                    "tui_terminal_error",
-                    format!("终端错误: {}", e.to_string()),
-                    format!("Terminal error: {}", e.to_string()),
-                )
-            }),
+            TerminalHandle::Stdout(terminal) => terminal.size().map_err(terminal_error),
             #[cfg(test)]
             TerminalHandle::Test(terminal) => terminal.size().map_err(|e| match e {}),
         }
@@ -265,13 +250,9 @@ impl TuiTerminal {
 
         #[cfg(test)]
         if let TerminalHandle::Test(terminal) = &mut self.terminal {
-            terminal.clear().map_err(|e| {
-                AppError::localized(
-                    "tui_terminal_error",
-                    format!("终端错误: {}", e.to_string()),
-                    format!("Terminal error: {}", e.to_string()),
-                )
-            })?;
+            terminal
+                .clear()
+                .expect("test terminal backend should clear infallibly");
             self.active = true;
             return Ok(());
         }
@@ -318,7 +299,48 @@ impl Drop for TuiTerminal {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
     use super::TuiTerminal;
+
+    #[test]
+    fn new_for_test_supports_parallel_construction_without_touching_real_tty() {
+        let barrier = Arc::new(Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    for _ in 0..32 {
+                        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+                        let size = terminal.size().expect("read terminal size");
+                        assert!(size.width > 0);
+                        assert!(size.height > 0);
+                        terminal.draw(|_| {}).expect("draw frame");
+                    }
+                })
+            })
+            .collect();
+
+        for handle in handles {
+            handle.join().expect("thread should complete without panic");
+        }
+    }
+
+    #[test]
+    fn with_terminal_restored_keeps_test_terminal_usable() {
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+
+        let value = terminal
+            .with_terminal_restored(|| Ok::<_, crate::error::AppError>(42))
+            .expect("run callback with terminal restored");
+
+        assert_eq!(value, 42);
+        terminal
+            .draw(|_| {})
+            .expect("draw after with_terminal_restored");
+    }
 
     #[test]
     fn test_terminal_can_activate_and_restore_without_real_tty() {

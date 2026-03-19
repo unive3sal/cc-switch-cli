@@ -3,7 +3,7 @@ use crate::provider::Provider;
 use serde_json::Value;
 
 use super::codex_config::parse_codex_config_snippet;
-use super::{ClaudeApiFormat, ProviderAddFormState};
+use super::{ClaudeApiFormat, ProviderAddFormState, OPENCLAW_DEFAULT_API_PROTOCOL};
 
 pub(super) fn populate_form_from_provider(
     form: &mut ProviderAddFormState,
@@ -15,6 +15,7 @@ pub(super) fn populate_form_from_provider(
         AppType::Codex => populate_codex_form(form, provider),
         AppType::Gemini => populate_gemini_form(form, provider),
         AppType::OpenCode => populate_opencode_form(form, provider),
+        AppType::OpenClaw => populate_openclaw_form(form, provider),
     }
 }
 
@@ -189,6 +190,60 @@ fn populate_opencode_form(form: &mut ProviderAddFormState, provider: &Provider) 
                     form.opencode_model_output_limit.set(output.to_string());
                 }
             }
+        }
+    }
+}
+
+fn populate_openclaw_form(form: &mut ProviderAddFormState, provider: &Provider) {
+    if let Some(api_key) = provider
+        .settings_config
+        .get("apiKey")
+        .and_then(|value| value.as_str())
+    {
+        form.opencode_api_key.set(api_key);
+    }
+    if let Some(base_url) = provider
+        .settings_config
+        .get("baseUrl")
+        .and_then(|value| value.as_str())
+    {
+        form.opencode_base_url.set(base_url);
+    }
+    if let Some(api) = provider
+        .settings_config
+        .get("api")
+        .and_then(|value| value.as_str())
+    {
+        form.opencode_npm_package.set(api);
+    } else {
+        form.opencode_npm_package.set(OPENCLAW_DEFAULT_API_PROTOCOL);
+    }
+    if provider
+        .settings_config
+        .get("headers")
+        .and_then(|value| value.as_object())
+        .is_some_and(|headers| headers.contains_key("User-Agent"))
+    {
+        form.openclaw_user_agent = true;
+    }
+    if let Some(models) = provider
+        .settings_config
+        .get("models")
+        .and_then(|value| value.as_array())
+    {
+        form.openclaw_models = models.clone();
+    }
+    if let Some(model) = form.openclaw_models.first() {
+        if let Some(id) = model.get("id").and_then(|value| value.as_str()) {
+            form.opencode_model_original_id = Some(id.to_string());
+            form.opencode_model_id.set(id);
+        }
+        if let Some(name) = model.get("name").and_then(|value| value.as_str()) {
+            form.opencode_model_name.set(name);
+        }
+        if let Some(context_window) = model.get("contextWindow").and_then(|value| value.as_u64()) {
+            form.opencode_model_context_limit
+                .set(context_window.to_string());
         }
     }
 }

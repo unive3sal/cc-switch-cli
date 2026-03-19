@@ -7,7 +7,7 @@ use crate::provider::{Provider, ProviderMeta, UsageScript};
 use crate::services::ProviderService;
 use crate::store::AppState;
 use crate::AppType;
-use serde_json::json;
+use serde_json::{json, Map, Value};
 use std::str::FromStr;
 
 /// Import a provider from a deep link request.
@@ -139,6 +139,7 @@ fn build_provider_from_request(
         AppType::Codex => build_codex_settings(request),
         AppType::Gemini => build_gemini_settings(request),
         AppType::OpenCode => build_opencode_settings(request),
+        AppType::OpenClaw => build_openclaw_settings(request),
     };
 
     let meta = build_provider_meta(request)?;
@@ -327,6 +328,62 @@ fn build_opencode_settings(request: &DeepLinkImportRequest) -> serde_json::Value
     })
 }
 
+fn build_openclaw_settings(request: &DeepLinkImportRequest) -> serde_json::Value {
+    if let Some(config) = &request.openclaw_config {
+        let mut settings = match config {
+            Value::Object(map) => map.clone(),
+            _ => Map::new(),
+        };
+
+        let endpoint = get_primary_endpoint(request);
+        if !endpoint.is_empty() {
+            settings.insert("baseUrl".to_string(), json!(endpoint));
+        }
+        if let Some(api_key) = request.api_key.as_deref().filter(|value| !value.is_empty()) {
+            settings.insert("apiKey".to_string(), json!(api_key));
+        }
+        if let Some(model) = request
+            .model
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            settings.insert(
+                "models".to_string(),
+                json!([{ "id": model, "name": model }]),
+            );
+        }
+        settings
+            .entry("api".to_string())
+            .or_insert_with(|| json!("openai-completions"));
+
+        return Value::Object(settings);
+    }
+
+    let endpoint = get_primary_endpoint(request);
+    let mut settings = serde_json::Map::new();
+
+    if !endpoint.is_empty() {
+        settings.insert("baseUrl".to_string(), json!(endpoint));
+    }
+    if let Some(api_key) = &request.api_key {
+        settings.insert("apiKey".to_string(), json!(api_key));
+    }
+    settings.insert("api".to_string(), json!("openai-completions"));
+
+    if let Some(model) = request
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        settings.insert(
+            "models".to_string(),
+            json!([{ "id": model, "name": model }]),
+        );
+    }
+
+    serde_json::Value::Object(settings)
+}
+
 /// Parse and merge configuration from Base64 encoded config or remote URL.
 ///
 /// Priority: URL params > inline config > remote config.
@@ -376,6 +433,7 @@ pub fn parse_and_merge_config(
         "codex" => merge_codex_config(&mut merged, &config_value)?,
         "gemini" => merge_gemini_config(&mut merged, &config_value)?,
         "opencode" => merge_additive_config(&mut merged, &config_value)?,
+        "openclaw" => merge_openclaw_config(&mut merged, &config_value)?,
         "" => return Ok(merged),
         other => return Err(AppError::InvalidInput(format!("Invalid app type: {other}"))),
     }
@@ -571,6 +629,102 @@ fn merge_additive_config(
     }
 
     Ok(())
+}
+
+fn merge_openclaw_config(
+    request: &mut DeepLinkImportRequest,
+    config: &serde_json::Value,
+) -> Result<(), AppError> {
+    let mut canonical = canonicalize_openclaw_config(config)?;
+
+    if request.api_key.as_ref().is_none_or(|s| s.is_empty()) {
+        if let Some(api_key) = canonical.get("apiKey").and_then(Value::as_str) {
+            request.api_key = Some(api_key.to_string());
+        }
+    }
+
+    if request.endpoint.as_ref().is_none_or(|s| s.is_empty()) {
+        if let Some(base_url) = canonical.get("baseUrl").and_then(Value::as_str) {
+            request.endpoint = Some(base_url.to_string());
+        }
+    }
+
+    if request.homepage.as_ref().is_none_or(|s| s.is_empty()) {
+        if let Some(endpoint) = request.endpoint.as_ref().filter(|value| !value.is_empty()) {
+            request.homepage = infer_homepage_from_endpoint(endpoint);
+        }
+    }
+
+    if let Some(api_key) = request.api_key.as_ref().filter(|value| !value.is_empty()) {
+        canonical.insert("apiKey".to_string(), json!(api_key));
+    }
+
+    let endpoint = get_primary_endpoint(request);
+    if !endpoint.is_empty() {
+        canonical.insert("baseUrl".to_string(), json!(endpoint));
+    }
+
+    if let Some(model) = request
+        .model
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        canonical.insert(
+            "models".to_string(),
+            json!([{ "id": model, "name": model }]),
+        );
+    }
+
+    canonical
+        .entry("api".to_string())
+        .or_insert_with(|| json!("openai-completions"));
+
+    request.openclaw_config = Some(Value::Object(canonical));
+    Ok(())
+}
+
+fn canonicalize_openclaw_config(config: &Value) -> Result<Map<String, Value>, AppError> {
+    let canonical = config.as_object().cloned().ok_or_else(|| {
+        AppError::InvalidInput("OpenClaw config must be a JSON object".to_string())
+    })?;
+
+    reject_legacy_openclaw_aliases(&canonical)?;
+
+    serde_json::from_value::<crate::provider::OpenClawProviderConfig>(Value::Object(
+        canonical.clone(),
+    ))
+    .map_err(|err| AppError::InvalidInput(format!("invalid OpenClaw provider schema: {err}")))?;
+
+    Ok(canonical)
+}
+
+fn reject_legacy_openclaw_aliases(config: &Map<String, Value>) -> Result<(), AppError> {
+    let mut aliases = Vec::new();
+
+    for alias in ["api_key", "base_url", "options", "npm"] {
+        if config.contains_key(alias) {
+            aliases.push(alias.to_string());
+        }
+    }
+
+    if let Some(models) = config.get("models").and_then(Value::as_array) {
+        for (index, model) in models.iter().enumerate() {
+            if let Some(model_obj) = model.as_object() {
+                if model_obj.contains_key("context_window") {
+                    aliases.push(format!("models[{index}].context_window"));
+                }
+            }
+        }
+    }
+
+    if aliases.is_empty() {
+        return Ok(());
+    }
+
+    Err(AppError::InvalidInput(format!(
+        "OpenClaw config uses unsupported legacy alias keys: {}. Use canonical OpenClaw keys instead.",
+        aliases.join(", ")
+    )))
 }
 
 fn extract_codex_base_url(toml_value: &toml::Value) -> Option<String> {

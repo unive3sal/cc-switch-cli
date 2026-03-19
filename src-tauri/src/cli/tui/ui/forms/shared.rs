@@ -37,9 +37,16 @@ pub(crate) fn add_form_key_items(
                     Some(ProviderAddField::CodexModel | ProviderAddField::GeminiModel) => {
                         texts::tui_key_fetch_model()
                     }
-                    Some(ProviderAddField::ClaudeModelConfig | ProviderAddField::CommonSnippet) => {
-                        texts::tui_key_open()
-                    }
+                    Some(
+                        ProviderAddField::ClaudeModelConfig
+                        | ProviderAddField::CommonSnippet
+                        | ProviderAddField::OpenClawModels,
+                    ) => texts::tui_key_open(),
+                    Some(
+                        ProviderAddField::GeminiAuthType
+                        | ProviderAddField::OpenClawApiProtocol
+                        | ProviderAddField::OpenClawUserAgent,
+                    ) => texts::tui_key_toggle(),
                     _ => texts::tui_key_edit_mode(),
                 };
                 keys.extend([

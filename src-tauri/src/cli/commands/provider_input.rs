@@ -55,6 +55,7 @@ pub fn prompt_settings_config_for_add(
         (AppType::Codex, ProviderAddMode::ThirdParty) => prompt_codex_config(None),
         (AppType::Gemini, _) => prompt_gemini_config(None),
         (AppType::OpenCode, _) => Ok(json!({})),
+        (AppType::OpenClaw, _) => Ok(json!({})),
     }
 }
 
@@ -275,6 +276,7 @@ pub fn prompt_settings_config(
         }
         AppType::Gemini => prompt_gemini_config(current),
         AppType::OpenCode => Ok(current.cloned().unwrap_or_else(|| json!({}))),
+        AppType::OpenClaw => Ok(current.cloned().unwrap_or_else(|| json!({}))),
     }
 }
 
@@ -840,6 +842,33 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
                 .settings_config
                 .get("models")
                 .and_then(|v| v.as_object())
+            {
+                println!("  {}: {}", texts::model_label(), models.len());
+            }
+        }
+        AppType::OpenClaw => {
+            if let Some(api_key) = provider
+                .settings_config
+                .get("apiKey")
+                .and_then(|v| v.as_str())
+            {
+                println!(
+                    "  {}: {}",
+                    texts::api_key_display_label(),
+                    mask_api_key(api_key)
+                );
+            }
+            if let Some(base_url) = provider
+                .settings_config
+                .get("baseUrl")
+                .and_then(|v| v.as_str())
+            {
+                println!("  {}: {}", texts::base_url_display_label(), base_url);
+            }
+            if let Some(models) = provider
+                .settings_config
+                .get("models")
+                .and_then(|v| v.as_array())
             {
                 println!("  {}: {}", texts::model_label(), models.len());
             }

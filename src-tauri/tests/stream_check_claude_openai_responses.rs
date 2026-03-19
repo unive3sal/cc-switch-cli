@@ -147,3 +147,30 @@ async fn stream_check_claude_openai_responses_uses_responses_endpoint() {
 
     upstream_handle.abort();
 }
+
+#[tokio::test]
+async fn stream_check_openclaw_returns_unsupported_before_auth_extraction() {
+    let provider = Provider::with_id(
+        "openclaw-check".to_string(),
+        "OpenClaw Check".to_string(),
+        json!({
+            "models": [
+                { "id": "gpt-4.1-mini" }
+            ]
+        }),
+        None,
+    );
+
+    let err = StreamCheckService::check_with_retry(
+        &AppType::OpenClaw,
+        &provider,
+        &StreamCheckConfig::default(),
+    )
+    .await
+    .expect_err("OpenClaw stream check should be rejected as unsupported");
+
+    assert!(
+        err.to_string().contains("OpenClaw 暂不支持流式检查"),
+        "unexpected error: {err}"
+    );
+}

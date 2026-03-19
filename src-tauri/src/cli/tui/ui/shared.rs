@@ -328,3 +328,57 @@ pub(super) fn mask_api_key(key: &str) -> String {
         prefix
     }
 }
+
+pub(super) fn redacted_secret_placeholder() -> &'static str {
+    "[redacted]"
+}
+
+pub(super) fn redact_sensitive_json(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| {
+                    let next = if is_sensitive_display_key(key) {
+                        redact_value_payload(value)
+                    } else {
+                        redact_sensitive_json(value)
+                    };
+                    (key.clone(), next)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(redact_sensitive_json).collect()),
+        _ => value.clone(),
+    }
+}
+
+fn redact_value_payload(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| (key.clone(), redact_value_payload(value)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(redact_value_payload).collect()),
+        Value::Null => Value::Null,
+        _ => Value::String(redacted_secret_placeholder().to_string()),
+    }
+}
+
+fn is_sensitive_display_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect::<String>();
+
+    normalized == "authorization"
+        || normalized.ends_with("authorization")
+        || normalized.ends_with("apikey")
+        || normalized.ends_with("token")
+        || normalized.ends_with("password")
+        || normalized.ends_with("secret")
+        || normalized.ends_with("awsaccesskeyid")
+        || normalized.ends_with("awssecretaccesskey")
+        || normalized.ends_with("secretkey")
+}

@@ -4,18 +4,27 @@ use std::ffi::OsString;
 use std::path::Path;
 use tempfile::TempDir;
 
+use crate::test_support::{
+    lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
+};
+
 struct EnvGuard {
+    _lock: TestHomeSettingsLock,
     old_home: Option<OsString>,
     old_userprofile: Option<OsString>,
 }
 
 impl EnvGuard {
     fn set_home(home: &Path) -> Self {
+        let lock = lock_test_home_and_settings();
         let old_home = std::env::var_os("HOME");
         let old_userprofile = std::env::var_os("USERPROFILE");
         std::env::set_var("HOME", home);
         std::env::set_var("USERPROFILE", home);
+        set_test_home_override(Some(home));
+        crate::settings::reload_test_settings();
         Self {
+            _lock: lock,
             old_home,
             old_userprofile,
         }
@@ -32,6 +41,8 @@ impl Drop for EnvGuard {
             Some(value) => std::env::set_var("USERPROFILE", value),
             None => std::env::remove_var("USERPROFILE"),
         }
+        set_test_home_override(self.old_home.as_deref().map(Path::new));
+        crate::settings::reload_test_settings();
     }
 }
 

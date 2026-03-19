@@ -807,9 +807,49 @@ impl ProxyService {
             })
             .and_then(|provider| {
                 provider
-                    .map(|provider| self.build_live_snapshot_from_provider(app_type, &provider))
+                    .map(|provider| {
+                        self.build_current_provider_restore_snapshot(app_type, &provider)
+                    })
                     .transpose()
             })
+    }
+
+    fn build_current_provider_restore_snapshot(
+        &self,
+        app_type: &AppType,
+        provider: &Provider,
+    ) -> Result<Value, String> {
+        let common_config_snippet =
+            self.db
+                .get_config_snippet(app_type.as_str())
+                .map_err(|error| {
+                    format!(
+                        "load common config snippet for {} failed: {error}",
+                        app_type.as_str()
+                    )
+                })?;
+        let apply_common_config = if matches!(app_type, AppType::Codex) {
+            false
+        } else {
+            provider
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.apply_common_config)
+                .unwrap_or(true)
+        };
+
+        crate::services::provider::ProviderService::build_live_backup_snapshot(
+            app_type,
+            provider,
+            common_config_snippet.as_deref(),
+            apply_common_config,
+        )
+        .map_err(|error| {
+            format!(
+                "build {} current-provider restore snapshot failed: {error}",
+                app_type.as_str()
+            )
+        })
     }
 
     async fn read_or_current_provider_live(&self, app_type: &AppType) -> Result<Value, String> {

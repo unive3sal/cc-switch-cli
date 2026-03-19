@@ -5,22 +5,27 @@ use std::path::{Path, PathBuf};
 
 use crate::error::AppError;
 
+pub(crate) fn home_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(home) = crate::test_support::test_home_override() {
+        return Some(home);
+    }
+
+    dirs::home_dir()
+}
+
 /// 获取 Claude Code 配置目录路径
 pub fn get_claude_config_dir() -> PathBuf {
     if let Some(custom) = crate::settings::get_claude_override_dir() {
         return custom;
     }
 
-    dirs::home_dir()
-        .expect("无法获取用户主目录")
-        .join(".claude")
+    home_dir().expect("无法获取用户主目录").join(".claude")
 }
 
 /// 默认 Claude MCP 配置文件路径 (~/.claude.json)
 pub fn get_default_claude_mcp_path() -> PathBuf {
-    dirs::home_dir()
-        .expect("无法获取用户主目录")
-        .join(".claude.json")
+    home_dir().expect("无法获取用户主目录").join(".claude.json")
 }
 
 fn derive_mcp_path_from_override(dir: &Path) -> Option<PathBuf> {
@@ -69,9 +74,7 @@ pub fn get_app_config_dir() -> PathBuf {
     //     return custom;
     // }
 
-    dirs::home_dir()
-        .expect("无法获取用户主目录")
-        .join(".cc-switch")
+    home_dir().expect("无法获取用户主目录").join(".cc-switch")
 }
 
 /// 获取应用配置文件路径

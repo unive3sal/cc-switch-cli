@@ -381,6 +381,20 @@ pub struct SkillService {
 }
 
 impl SkillService {
+    fn app_supports_skills(app: &AppType) -> bool {
+        !matches!(app, AppType::OpenClaw)
+    }
+
+    fn supported_skill_apps() -> impl Iterator<Item = AppType> {
+        [
+            AppType::Claude,
+            AppType::Codex,
+            AppType::Gemini,
+            AppType::OpenCode,
+        ]
+        .into_iter()
+    }
+
     pub fn new() -> Result<Self, AppError> {
         let http_client = Client::builder()
             .user_agent("cc-switch")
@@ -430,6 +444,11 @@ impl SkillService {
                     return Ok(custom.join("skills"));
                 }
             }
+            AppType::OpenClaw => {
+                if let Some(custom) = crate::settings::get_openclaw_override_dir() {
+                    return Ok(custom.join("skills"));
+                }
+            }
         }
 
         let home = dirs::home_dir().ok_or_else(|| {
@@ -445,6 +464,7 @@ impl SkillService {
             AppType::Codex => home.join(".codex").join("skills"),
             AppType::Gemini => home.join(".gemini").join("skills"),
             AppType::OpenCode => home.join(".config").join("opencode").join("skills"),
+            AppType::OpenClaw => home.join(".openclaw").join("skills"),
         })
     }
 
@@ -521,22 +541,12 @@ impl SkillService {
                 }
 
                 // Prefer looking in apps where this skill is enabled; fallback to all apps.
-                let mut candidates: Vec<AppType> = [
-                    AppType::Claude,
-                    AppType::Codex,
-                    AppType::Gemini,
-                    AppType::OpenCode,
-                ]
-                .into_iter()
-                .filter(|app| record.apps.is_enabled_for(app))
-                .collect();
+                let mut candidates: Vec<AppType> = Self::supported_skill_apps()
+                    .into_iter()
+                    .filter(|app| record.apps.is_enabled_for(app))
+                    .collect();
                 if candidates.is_empty() {
-                    candidates = vec![
-                        AppType::Claude,
-                        AppType::Codex,
-                        AppType::Gemini,
-                        AppType::OpenCode,
-                    ];
+                    candidates = Self::supported_skill_apps().collect();
                 }
 
                 let mut source: Option<PathBuf> = None;
@@ -589,12 +599,7 @@ impl SkillService {
 
         let mut discovered: HashMap<String, SkillApps> = HashMap::new();
 
-        for app in [
-            AppType::Claude,
-            AppType::Codex,
-            AppType::Gemini,
-            AppType::OpenCode,
-        ] {
+        for app in Self::supported_skill_apps() {
             let app_dir = match Self::get_app_skills_dir(&app) {
                 Ok(d) => d,
                 Err(_) => continue,
@@ -729,6 +734,10 @@ impl SkillService {
         app: &AppType,
         method: SyncMethod,
     ) -> Result<(), AppError> {
+        if !Self::app_supports_skills(app) {
+            return Ok(());
+        }
+
         let ssot_dir = Self::get_ssot_dir()?;
         let source = ssot_dir.join(directory);
         if !source.exists() {
@@ -764,6 +773,10 @@ impl SkillService {
     }
 
     pub fn remove_from_app(directory: &str, app: &AppType) -> Result<(), AppError> {
+        if !Self::app_supports_skills(app) {
+            return Ok(());
+        }
+
         let app_dir = Self::get_app_skills_dir(app)?;
         let path = app_dir.join(directory);
         if path.exists() || Self::is_symlink(&path) {
@@ -773,6 +786,10 @@ impl SkillService {
     }
 
     pub fn sync_to_app(index: &SkillsIndex, app: &AppType) -> Result<(), AppError> {
+        if !Self::app_supports_skills(app) {
+            return Ok(());
+        }
+
         for skill in index.skills.values() {
             if skill.apps.is_enabled_for(app) {
                 Self::sync_to_app_dir(&skill.directory, app, index.sync_method)?;
@@ -785,12 +802,7 @@ impl SkillService {
     pub fn sync_all_enabled_best_effort() -> Result<(), AppError> {
         let mut index = Self::load_index()?;
         let _ = Self::migrate_ssot_if_pending(&mut index);
-        for app in [
-            AppType::Claude,
-            AppType::Codex,
-            AppType::Gemini,
-            AppType::OpenCode,
-        ] {
+        for app in Self::supported_skill_apps() {
             if let Err(e) = Self::sync_to_app(&index, &app) {
                 log::warn!("同步 Skill 到 {app:?} 失败: {e}");
             }
@@ -805,12 +817,7 @@ impl SkillService {
         match app {
             Some(app) => Self::sync_to_app(&index, app)?,
             None => {
-                for app in [
-                    AppType::Claude,
-                    AppType::Codex,
-                    AppType::Gemini,
-                    AppType::OpenCode,
-                ] {
+                for app in Self::supported_skill_apps() {
                     Self::sync_to_app(&index, &app)?;
                 }
             }
@@ -903,6 +910,11 @@ impl SkillService {
         let Some(record) = index.skills.get_mut(&dir) else {
             return Err(AppError::Message(format!("未找到已安装的 Skill: {dir}")));
         };
+
+        if !Self::app_supports_skills(app) {
+            return Ok(());
+        }
+
         record.apps.set_enabled_for(app, enabled);
 
         if enabled {
@@ -1119,7 +1131,7 @@ impl SkillService {
         let managed: HashSet<String> = index.skills.keys().cloned().collect();
 
         let mut scan_sources: Vec<(PathBuf, String)> = Vec::new();
-        for app in AppType::all() {
+        for app in Self::supported_skill_apps() {
             if let Ok(app_dir) = Self::get_app_skills_dir(&app) {
                 scan_sources.push((app_dir, app.as_str().to_string()));
             }
@@ -1189,7 +1201,7 @@ impl SkillService {
         );
 
         let mut search_sources: Vec<(PathBuf, String)> = Vec::new();
-        for app in AppType::all() {
+        for app in Self::supported_skill_apps() {
             if let Ok(app_dir) = Self::get_app_skills_dir(&app) {
                 search_sources.push((app_dir, app.as_str().to_string()));
             }

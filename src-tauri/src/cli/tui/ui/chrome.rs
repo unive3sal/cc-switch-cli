@@ -1,3 +1,5 @@
+use crate::cli::tui::data;
+
 use super::*;
 
 pub(super) fn render_header(
@@ -12,7 +14,7 @@ pub(super) fn render_header(
         .constraints([
             Constraint::Length(12),
             Constraint::Min(0),
-            Constraint::Max(44),
+            Constraint::Max(60),
         ])
         .split(area);
 
@@ -34,6 +36,7 @@ pub(super) fn render_header(
         AppType::Codex => 1,
         AppType::Gemini => 2,
         AppType::OpenCode => 3,
+        AppType::OpenClaw => 4,
     };
     let tabs_line = Line::from(vec![
         Span::styled(
@@ -71,6 +74,15 @@ pub(super) fn render_header(
                 inactive_chip_style(theme)
             },
         ),
+        Span::raw(" "),
+        Span::styled(
+            format!(" {} ", AppType::OpenClaw.as_str()),
+            if selected == 4 {
+                active_chip_style(theme)
+            } else {
+                inactive_chip_style(theme)
+            },
+        ),
     ]);
     let tabs = Paragraph::new(tabs_line).alignment(Alignment::Center);
     frame.render_widget(tabs, chunks[1]);
@@ -80,8 +92,8 @@ pub(super) fn render_header(
         .rows
         .iter()
         .find(|p| p.is_current)
-        .map(|p| p.provider.name.as_str())
-        .unwrap_or(texts::none());
+        .map(|row| data::provider_display_name(&app.app_type, row))
+        .unwrap_or_else(|| texts::none().to_string());
 
     let current_app_routed = data
         .proxy

@@ -4,7 +4,7 @@ use std::{fs, path::Path};
 
 use cc_switch_lib::{
     get_claude_settings_path, read_json_file, AppError, AppType, ConfigService, Database,
-    MultiAppConfig, Provider, ProviderMeta,
+    MultiAppConfig, Provider, ProviderMeta, ProviderService,
 };
 
 #[path = "support.rs"]
@@ -1082,6 +1082,131 @@ fn sync_gemini_google_official_sets_oauth_security() {
         Some("oauth-personal"),
         "Gemini settings should also record oauth-personal"
     );
+}
+
+#[test]
+fn import_openclaw_live_config_preserves_unrelated_root_sections_and_source_text() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let openclaw_dir = home.join(".openclaw");
+    fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    let source = r#"// preserve-me
+{
+  models: {
+    mode: 'merge',
+    providers: {
+      openai: {
+        name: 'OpenAI Compatible',
+        apiKey: 'sk-openai',
+        baseUrl: 'https://api.example.com/v1',
+        models: [
+          {
+            id: 'gpt-4.1',
+            name: 'OpenAI Compatible',
+          },
+        ],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: {
+        primary: 'openai/gpt-4.1',
+      },
+    },
+  },
+  tools: {
+    profile: 'coding',
+  },
+}
+"#;
+    fs::write(&openclaw_path, source).expect("seed openclaw json5 config");
+
+    let state = state_from_config(MultiAppConfig::default());
+
+    ProviderService::import_openclaw_providers_from_live(&state)
+        .expect("import openclaw live config should succeed");
+
+    let after = fs::read_to_string(&openclaw_path).expect("read openclaw file after import");
+    assert_eq!(
+        after, source,
+        "import should not rewrite unrelated OpenClaw document sections or formatting"
+    );
+
+    let guard = state.config.read().expect("read config after import");
+    let manager = guard
+        .get_manager(&AppType::OpenClaw)
+        .expect("openclaw manager after import");
+    assert!(manager.providers.contains_key("openai"));
+}
+
+#[test]
+fn import_openclaw_live_config_skips_modeless_default_provider_without_rewriting_source_text() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    let openclaw_dir = home.join(".openclaw");
+    fs::create_dir_all(&openclaw_dir).expect("create openclaw dir");
+    let openclaw_path = openclaw_dir.join("openclaw.json");
+    let source = r#"// preserve-me-too
+{
+  models: {
+    mode: 'merge',
+    providers: {
+      empty: {
+        apiKey: 'sk-empty',
+        baseUrl: 'https://empty.example.com/v1',
+        models: [],
+      },
+      openai: {
+        apiKey: 'sk-openai',
+        baseUrl: 'https://api.example.com/v1',
+        models: [
+          {
+            id: 'gpt-4.1',
+            name: 'OpenAI Compatible',
+          },
+        ],
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: {
+        primary: 'empty/gpt-4.1',
+        fallbacks: ['openai/gpt-4.1'],
+      },
+    },
+  },
+  tools: {
+    profile: 'coding',
+  },
+}
+"#;
+    fs::write(&openclaw_path, source).expect("seed openclaw json5 config");
+
+    let state = state_from_config(MultiAppConfig::default());
+
+    ProviderService::import_openclaw_providers_from_live(&state)
+        .expect("import openclaw live config should succeed");
+
+    let after = fs::read_to_string(&openclaw_path).expect("read openclaw file after import");
+    assert_eq!(
+        after, source,
+        "import should not rewrite the OpenClaw source document while skipping modeless providers"
+    );
+
+    let guard = state.config.read().expect("read config after import");
+    let manager = guard
+        .get_manager(&AppType::OpenClaw)
+        .expect("openclaw manager after import");
+    assert!(!manager.providers.contains_key("empty"));
+    assert!(manager.providers.contains_key("openai"));
+    assert_eq!(manager.providers.len(), 1);
 }
 
 #[test]

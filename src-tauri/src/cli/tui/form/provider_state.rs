@@ -1,4 +1,5 @@
 use crate::app_config::AppType;
+use crate::cli::i18n::texts;
 use crate::provider::Provider;
 use serde_json::{json, Value};
 
@@ -8,11 +9,17 @@ use super::provider_json::{
 use super::provider_state_loading::populate_form_from_provider;
 use super::{
     ClaudeApiFormat, CodexPreviewSection, CodexWireApi, FormFocus, FormMode, GeminiAuthType,
-    ProviderAddField, ProviderAddFormState, TextInput,
+    ProviderAddField, ProviderAddFormState, TextInput, OPENCLAW_DEFAULT_API_PROTOCOL,
 };
 
 impl ProviderAddFormState {
     pub fn new(app_type: AppType) -> Self {
+        let include_common_config = !matches!(app_type, AppType::OpenClaw);
+        let openclaw_api_default = match app_type {
+            AppType::OpenClaw => OPENCLAW_DEFAULT_API_PROTOCOL,
+            _ => "@ai-sdk/openai-compatible",
+        };
+
         let codex_defaults = match app_type {
             AppType::Codex => (
                 "https://api.openai.com/v1",
@@ -36,7 +43,7 @@ impl ProviderAddFormState {
             name: TextInput::new(""),
             website_url: TextInput::new(""),
             notes: TextInput::new(""),
-            include_common_config: true,
+            include_common_config,
             json_scroll: 0,
             codex_preview_section: CodexPreviewSection::Auth,
             codex_auth_scroll: 0,
@@ -60,7 +67,9 @@ impl ProviderAddFormState {
             gemini_api_key: TextInput::new(""),
             gemini_base_url: TextInput::new("https://generativelanguage.googleapis.com"),
             gemini_model: TextInput::new(""),
-            opencode_npm_package: TextInput::new("@ai-sdk/openai-compatible"),
+            openclaw_user_agent: false,
+            openclaw_models: Vec::new(),
+            opencode_npm_package: TextInput::new(openclaw_api_default),
             opencode_api_key: TextInput::new(""),
             opencode_base_url: TextInput::new(""),
             opencode_model_id: TextInput::new(""),
@@ -92,7 +101,11 @@ impl ProviderAddFormState {
             .meta
             .as_ref()
             .and_then(|meta| meta.apply_common_config)
-            .unwrap_or(true);
+            .unwrap_or(!matches!(app_type, AppType::OpenClaw));
+
+        if matches!(app_type, AppType::OpenClaw) {
+            form.include_common_config = false;
+        }
 
         populate_form_from_provider(&mut form, &app_type, provider);
 
@@ -130,6 +143,10 @@ impl ProviderAddFormState {
             ProviderAddField::Notes,
         ];
 
+        if matches!(self.app_type, AppType::OpenClaw) {
+            fields.insert(0, ProviderAddField::Id);
+        }
+
         match self.app_type {
             AppType::Claude => {
                 if !self.is_claude_official_provider() {
@@ -163,11 +180,20 @@ impl ProviderAddFormState {
                 fields.push(ProviderAddField::OpenCodeModelContextLimit);
                 fields.push(ProviderAddField::OpenCodeModelOutputLimit);
             }
+            AppType::OpenClaw => {
+                fields.push(ProviderAddField::OpenClawApiProtocol);
+                fields.push(ProviderAddField::OpenCodeApiKey);
+                fields.push(ProviderAddField::OpenCodeBaseUrl);
+                fields.push(ProviderAddField::OpenClawUserAgent);
+                fields.push(ProviderAddField::OpenClawModels);
+            }
         }
 
-        fields.push(ProviderAddField::CommonConfigDivider);
-        fields.push(ProviderAddField::CommonSnippet);
-        fields.push(ProviderAddField::IncludeCommonConfig);
+        if !matches!(self.app_type, AppType::OpenClaw) {
+            fields.push(ProviderAddField::CommonConfigDivider);
+            fields.push(ProviderAddField::CommonSnippet);
+            fields.push(ProviderAddField::IncludeCommonConfig);
+        }
         fields
     }
 
@@ -198,6 +224,9 @@ impl ProviderAddFormState {
             | ProviderAddField::ClaudeApiFormat
             | ProviderAddField::ClaudeModelConfig
             | ProviderAddField::GeminiAuthType
+            | ProviderAddField::OpenClawApiProtocol
+            | ProviderAddField::OpenClawUserAgent
+            | ProviderAddField::OpenClawModels
             | ProviderAddField::CommonConfigDivider
             | ProviderAddField::CommonSnippet
             | ProviderAddField::IncludeCommonConfig => None,
@@ -235,6 +264,9 @@ impl ProviderAddFormState {
             | ProviderAddField::ClaudeApiFormat
             | ProviderAddField::ClaudeModelConfig
             | ProviderAddField::GeminiAuthType
+            | ProviderAddField::OpenClawApiProtocol
+            | ProviderAddField::OpenClawUserAgent
+            | ProviderAddField::OpenClawModels
             | ProviderAddField::CommonConfigDivider
             | ProviderAddField::CommonSnippet
             | ProviderAddField::IncludeCommonConfig => None,
@@ -474,6 +506,45 @@ impl ProviderAddFormState {
         }
 
         None
+    }
+
+    pub(super) fn openclaw_primary_model_id(&self) -> Option<String> {
+        let model_id = self.opencode_model_id.value.trim();
+        if model_id.is_empty() {
+            None
+        } else {
+            Some(model_id.to_string())
+        }
+    }
+
+    pub(crate) fn openclaw_models_summary(&self) -> String {
+        let total = self.openclaw_models.len();
+        texts::tui_openclaw_models_summary(total)
+    }
+
+    pub(crate) fn openclaw_models_editor_text(&self) -> String {
+        serde_json::to_string_pretty(&Value::Array(self.openclaw_models.clone()))
+            .unwrap_or_else(|_| "[]".to_string())
+    }
+
+    pub fn apply_openclaw_models_value(&mut self, models_value: Value) -> Result<(), String> {
+        if !matches!(self.app_type, AppType::OpenClaw) {
+            return Ok(());
+        }
+        if !models_value.is_array() {
+            return Err(texts::tui_toast_json_must_be_array().to_string());
+        }
+
+        let mut provider_value = self.to_provider_json_value();
+        let settings_value = provider_value
+            .as_object_mut()
+            .and_then(|obj| obj.get_mut("settingsConfig"))
+            .ok_or_else(|| texts::tui_toast_json_must_be_object().to_string())?;
+        let settings_obj = settings_value
+            .as_object_mut()
+            .ok_or_else(|| texts::tui_toast_json_must_be_object().to_string())?;
+        settings_obj.insert("models".to_string(), models_value);
+        self.apply_provider_json_value_to_fields(provider_value)
     }
 }
 

@@ -34,6 +34,7 @@ fn inquire_color_for_app(app_type: &AppType) -> InquireColor {
         AppType::Claude => InquireColor::LightCyan,
         AppType::Gemini => InquireColor::LightMagenta,
         AppType::OpenCode => InquireColor::LightGreen,
+        AppType::OpenClaw => InquireColor::LightRed,
     }
 }
 
@@ -84,6 +85,7 @@ fn highlight_color_for_app(app_type: &AppType) -> Color {
         AppType::Claude => Color::BrightCyan,
         AppType::Gemini => Color::BrightMagenta,
         AppType::OpenCode => Color::BrightGreen,
+        AppType::OpenClaw => Color::BrightRed,
     }
 }
 
@@ -139,6 +141,31 @@ mod tests {
         assert_eq!(
             highlight("x"),
             "x".color(Color::BrightMagenta).bold().to_string()
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn openclaw_theme_colors_are_distinct_from_existing_apps() {
+        let _guard = ColorOverrideGuard::force_on();
+
+        assert_eq!(
+            inquire_color_for_app(&AppType::OpenClaw),
+            InquireColor::LightRed
+        );
+        assert_ne!(
+            inquire_color_for_app(&AppType::OpenClaw),
+            inquire_color_for_app(&AppType::OpenCode)
+        );
+        assert_ne!(
+            inquire_color_for_app(&AppType::OpenClaw),
+            inquire_color_for_app(&AppType::Codex)
+        );
+
+        set_tui_theme_app(Some(AppType::OpenClaw));
+        assert_eq!(
+            highlight("x"),
+            "x".color(Color::BrightRed).bold().to_string()
         );
     }
 }

@@ -5,7 +5,10 @@ use super::codex_config::{
     build_codex_provider_config_toml, clean_codex_provider_key, merge_codex_common_config_snippet,
     strip_codex_common_config_snippet, update_codex_config_snippet,
 };
-use super::{ClaudeApiFormat, GeminiAuthType, ProviderAddFormState};
+use super::{
+    ClaudeApiFormat, GeminiAuthType, ProviderAddFormState, OPENCLAW_DEFAULT_API_PROTOCOL,
+    OPENCLAW_DEFAULT_USER_AGENT,
+};
 
 impl ProviderAddFormState {
     pub fn to_provider_json_value(&self) -> Value {
@@ -33,7 +36,11 @@ impl ProviderAddFormState {
         if let Some(meta_obj) = meta_value.as_object_mut() {
             meta_obj.insert(
                 "applyCommonConfig".to_string(),
-                json!(self.include_common_config),
+                json!(if matches!(self.app_type, AppType::OpenClaw) {
+                    false
+                } else {
+                    self.include_common_config
+                }),
             );
             if matches!(self.app_type, AppType::Claude) {
                 match self.claude_api_format {
@@ -285,6 +292,118 @@ impl ProviderAddFormState {
                     settings_obj.insert("models".to_string(), models_value);
                 }
             }
+            AppType::OpenClaw => {
+                settings_obj.remove("npm");
+                settings_obj.remove("options");
+                settings_obj.remove("api_key");
+                settings_obj.remove("base_url");
+
+                set_or_remove_trimmed(settings_obj, "apiKey", &self.opencode_api_key.value);
+                set_or_remove_trimmed(settings_obj, "baseUrl", &self.opencode_base_url.value);
+
+                let api_value = self.opencode_npm_package.value.trim();
+                settings_obj.insert(
+                    "api".to_string(),
+                    json!(if api_value.is_empty() {
+                        OPENCLAW_DEFAULT_API_PROTOCOL
+                    } else {
+                        api_value
+                    }),
+                );
+
+                let mut headers_obj = match settings_obj.remove("headers") {
+                    Some(Value::Object(map)) => map,
+                    _ => serde_json::Map::new(),
+                };
+                if self.openclaw_user_agent {
+                    headers_obj
+                        .entry("User-Agent".to_string())
+                        .or_insert_with(|| json!(OPENCLAW_DEFAULT_USER_AGENT));
+                } else {
+                    headers_obj.remove("User-Agent");
+                }
+                if headers_obj.is_empty() {
+                    settings_obj.remove("headers");
+                } else {
+                    settings_obj.insert("headers".to_string(), Value::Object(headers_obj));
+                }
+
+                let mut models = if self.openclaw_models.is_empty() {
+                    match settings_obj.remove("models") {
+                        Some(Value::Array(items)) => items,
+                        _ => Vec::new(),
+                    }
+                } else {
+                    self.openclaw_models.clone()
+                };
+
+                let model_id = self.openclaw_primary_model_id();
+                match model_id {
+                    Some(model_id) => {
+                        let mut original_index = self
+                            .opencode_model_original_id
+                            .as_deref()
+                            .and_then(|original_id| openclaw_model_index(&models, original_id));
+
+                        if let Some(existing_index) = openclaw_model_index(&models, &model_id) {
+                            if Some(existing_index) != original_index {
+                                models.remove(existing_index);
+                                if let Some(index) = original_index.as_mut() {
+                                    if existing_index < *index {
+                                        *index = index.saturating_sub(1);
+                                    }
+                                }
+                            }
+                        }
+
+                        let target_index =
+                            original_index.or_else(|| openclaw_model_index(&models, &model_id));
+
+                        let mut model_obj = target_index
+                            .and_then(|index| models.get(index).cloned())
+                            .and_then(|value| value.as_object().cloned())
+                            .unwrap_or_default();
+
+                        model_obj.insert("id".to_string(), json!(model_id.clone()));
+
+                        let model_name = self.opencode_model_name.value.trim();
+                        if model_name.is_empty() {
+                            model_obj.remove("name");
+                        } else {
+                            model_obj.insert("name".to_string(), json!(model_name));
+                        }
+
+                        let context_value = self.opencode_model_context_limit.value.trim();
+                        if context_value.is_empty() {
+                            model_obj.remove("contextWindow");
+                            model_obj.remove("context_window");
+                        } else if let Ok(context_window) = context_value.parse::<u32>() {
+                            model_obj.remove("context_window");
+                            model_obj.insert("contextWindow".to_string(), json!(context_window));
+                        }
+
+                        let updated_model = Value::Object(model_obj);
+                        if let Some(index) = target_index {
+                            models[index] = updated_model;
+                        } else {
+                            models.push(updated_model);
+                        }
+                    }
+                    None => {
+                        if let Some(original_id) = self.opencode_model_original_id.as_deref() {
+                            if let Some(index) = openclaw_model_index(&models, original_id) {
+                                models.remove(index);
+                            }
+                        }
+                    }
+                }
+
+                if models.is_empty() {
+                    settings_obj.remove("models");
+                } else {
+                    settings_obj.insert("models".to_string(), Value::Array(models));
+                }
+            }
         }
 
         Value::Object(provider_obj)
@@ -295,7 +414,7 @@ impl ProviderAddFormState {
         common_snippet: &str,
     ) -> Result<Value, String> {
         let mut provider_value = self.to_provider_json_value();
-        if !self.include_common_config {
+        if matches!(self.app_type, AppType::OpenClaw) || !self.include_common_config {
             return Ok(provider_value);
         }
 
@@ -325,7 +444,7 @@ impl ProviderAddFormState {
                 merge_json_values(&mut common, settings_value);
                 *settings_value = common;
             }
-            AppType::OpenCode => {}
+            AppType::OpenCode | AppType::OpenClaw => {}
             AppType::Codex => {
                 if !settings_value.is_object() {
                     *settings_value = json!({});
@@ -344,6 +463,16 @@ impl ProviderAddFormState {
 
         Ok(provider_value)
     }
+}
+
+fn openclaw_model_index(models: &[Value], model_id: &str) -> Option<usize> {
+    models.iter().position(|model| {
+        model
+            .get("id")
+            .and_then(Value::as_str)
+            .map(|id| id == model_id)
+            .unwrap_or(false)
+    })
 }
 
 pub(crate) fn merge_json_values(base: &mut Value, overlay: &Value) {
@@ -385,7 +514,7 @@ pub(crate) fn strip_common_config_from_settings(
 
             strip_common_json_values(settings_value, &common);
         }
-        AppType::OpenCode => {}
+        AppType::OpenCode | AppType::OpenClaw => {}
         AppType::Codex => {
             if !settings_value.is_object() {
                 return Ok(());
@@ -419,7 +548,8 @@ pub(crate) fn should_hide_provider_field(key: &str) -> bool {
     )
 }
 
-pub fn strip_provider_internal_fields(value: &Value) -> Value {
+#[cfg(test)]
+pub(crate) fn strip_provider_internal_fields(value: &Value) -> Value {
     match value {
         Value::Object(map) => {
             let mut out = serde_json::Map::new();

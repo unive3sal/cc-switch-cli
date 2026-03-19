@@ -25,6 +25,7 @@ impl McpApps {
             AppType::Codex => self.codex,
             AppType::Gemini => self.gemini,
             AppType::OpenCode => self.opencode,
+            AppType::OpenClaw => false,
         }
     }
 
@@ -35,6 +36,7 @@ impl McpApps {
             AppType::Codex => self.codex = enabled,
             AppType::Gemini => self.gemini = enabled,
             AppType::OpenCode => self.opencode = enabled,
+            AppType::OpenClaw => {}
         }
     }
 
@@ -82,6 +84,7 @@ impl SkillApps {
             AppType::Codex => self.codex,
             AppType::Gemini => self.gemini,
             AppType::OpenCode => self.opencode,
+            AppType::OpenClaw => false,
         }
     }
 
@@ -91,6 +94,7 @@ impl SkillApps {
             AppType::Codex => self.codex = enabled,
             AppType::Gemini => self.gemini = enabled,
             AppType::OpenCode => self.opencode = enabled,
+            AppType::OpenClaw => {}
         }
     }
 
@@ -216,6 +220,8 @@ pub struct McpRoot {
     pub gemini: McpConfig,
     #[serde(default, skip_serializing_if = "McpConfig::is_empty")]
     pub opencode: McpConfig,
+    #[serde(default, skip_serializing_if = "McpConfig::is_empty")]
+    pub openclaw: McpConfig,
 }
 
 impl Default for McpRoot {
@@ -228,6 +234,7 @@ impl Default for McpRoot {
             codex: McpConfig::default(),
             gemini: McpConfig::default(),
             opencode: McpConfig::default(),
+            openclaw: McpConfig::default(),
         }
     }
 }
@@ -250,6 +257,8 @@ pub struct PromptRoot {
     pub gemini: PromptConfig,
     #[serde(default)]
     pub opencode: PromptConfig,
+    #[serde(default)]
+    pub openclaw: PromptConfig,
 }
 
 use crate::config::{copy_file, get_app_config_dir, get_app_config_path, write_json_file};
@@ -265,6 +274,7 @@ pub enum AppType {
     Codex,
     Gemini,
     OpenCode,
+    OpenClaw,
 }
 
 impl AppType {
@@ -274,11 +284,12 @@ impl AppType {
             AppType::Codex => "codex",
             AppType::Gemini => "gemini",
             AppType::OpenCode => "opencode",
+            AppType::OpenClaw => "openclaw",
         }
     }
 
     pub fn is_additive_mode(&self) -> bool {
-        matches!(self, AppType::OpenCode)
+        matches!(self, AppType::OpenCode | AppType::OpenClaw)
     }
 
     pub fn all() -> impl Iterator<Item = AppType> {
@@ -287,6 +298,7 @@ impl AppType {
             AppType::Codex,
             AppType::Gemini,
             AppType::OpenCode,
+            AppType::OpenClaw,
         ]
         .into_iter()
     }
@@ -308,10 +320,15 @@ impl FromStr for AppType {
             "codex" => Ok(AppType::Codex),
             "gemini" => Ok(AppType::Gemini),
             "opencode" => Ok(AppType::OpenCode),
+            "openclaw" => Ok(AppType::OpenClaw),
             other => Err(AppError::localized(
                 "unsupported_app",
-                format!("不支持的应用标识: '{other}'。可选值: claude, codex, gemini, opencode。"),
-                format!("Unsupported app id: '{other}'. Allowed: claude, codex, gemini, opencode."),
+                format!(
+                    "不支持的应用标识: '{other}'。可选值: claude, codex, gemini, opencode, openclaw。"
+                ),
+                format!(
+                    "Unsupported app id: '{other}'. Allowed: claude, codex, gemini, opencode, openclaw."
+                ),
             )),
         }
     }
@@ -331,6 +348,9 @@ pub struct CommonConfigSnippets {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opencode: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openclaw: Option<String>,
 }
 
 impl CommonConfigSnippets {
@@ -341,6 +361,7 @@ impl CommonConfigSnippets {
             AppType::Codex => self.codex.as_ref(),
             AppType::Gemini => self.gemini.as_ref(),
             AppType::OpenCode => self.opencode.as_ref(),
+            AppType::OpenClaw => self.openclaw.as_ref(),
         }
     }
 
@@ -351,6 +372,7 @@ impl CommonConfigSnippets {
             AppType::Codex => self.codex = snippet,
             AppType::Gemini => self.gemini = snippet,
             AppType::OpenCode => self.opencode = snippet,
+            AppType::OpenClaw => self.openclaw = snippet,
         }
     }
 }
@@ -391,6 +413,7 @@ impl Default for MultiAppConfig {
         apps.insert("codex".to_string(), ProviderManager::default());
         apps.insert("gemini".to_string(), ProviderManager::default());
         apps.insert("opencode".to_string(), ProviderManager::default());
+        apps.insert("openclaw".to_string(), ProviderManager::default());
 
         Self {
             version: 2,
@@ -486,6 +509,13 @@ impl MultiAppConfig {
             updated = true;
         }
 
+        if !config.apps.contains_key("openclaw") {
+            config
+                .apps
+                .insert("openclaw".to_string(), ProviderManager::default());
+            updated = true;
+        }
+
         // 执行 MCP 迁移（v3.6.x → v3.7.0）
         let migrated = config.migrate_mcp_to_unified()?;
         if migrated {
@@ -557,6 +587,7 @@ impl MultiAppConfig {
             AppType::Codex => &self.mcp.codex,
             AppType::Gemini => &self.mcp.gemini,
             AppType::OpenCode => &self.mcp.opencode,
+            AppType::OpenClaw => &self.mcp.openclaw,
         }
     }
 
@@ -567,6 +598,7 @@ impl MultiAppConfig {
             AppType::Codex => &mut self.mcp.codex,
             AppType::Gemini => &mut self.mcp.gemini,
             AppType::OpenCode => &mut self.mcp.opencode,
+            AppType::OpenClaw => &mut self.mcp.openclaw,
         }
     }
 
@@ -581,6 +613,7 @@ impl MultiAppConfig {
         Self::auto_import_prompt_if_exists(&mut config, AppType::Codex)?;
         Self::auto_import_prompt_if_exists(&mut config, AppType::Gemini)?;
         Self::auto_import_prompt_if_exists(&mut config, AppType::OpenCode)?;
+        Self::auto_import_prompt_if_exists(&mut config, AppType::OpenClaw)?;
 
         Ok(config)
     }
@@ -601,6 +634,7 @@ impl MultiAppConfig {
             || !self.prompts.codex.prompts.is_empty()
             || !self.prompts.gemini.prompts.is_empty()
             || !self.prompts.opencode.prompts.is_empty()
+            || !self.prompts.openclaw.prompts.is_empty()
         {
             return Ok(false);
         }
@@ -613,6 +647,7 @@ impl MultiAppConfig {
             AppType::Codex,
             AppType::Gemini,
             AppType::OpenCode,
+            AppType::OpenClaw,
         ] {
             // 复用已有的单应用导入逻辑
             if Self::auto_import_prompt_if_exists(self, app)? {
@@ -680,6 +715,7 @@ impl MultiAppConfig {
             AppType::Codex => &mut config.prompts.codex.prompts,
             AppType::Gemini => &mut config.prompts.gemini.prompts,
             AppType::OpenCode => &mut config.prompts.opencode.prompts,
+            AppType::OpenClaw => &mut config.prompts.openclaw.prompts,
         };
 
         prompts.insert(id, prompt);
@@ -719,6 +755,7 @@ impl MultiAppConfig {
                 AppType::Codex => &self.mcp.codex.servers,
                 AppType::Gemini => &self.mcp.gemini.servers,
                 AppType::OpenCode => &self.mcp.opencode.servers,
+                AppType::OpenClaw => continue,
             };
 
             for (id, entry) in old_servers {
@@ -830,29 +867,37 @@ impl MultiAppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use serial_test::serial;
     use std::env;
+    use std::ffi::OsString;
     use std::fs;
+    use std::path::Path;
     use tempfile::TempDir;
 
     struct TempHome {
         #[allow(dead_code)] // 字段通过 Drop trait 管理临时目录生命周期
         dir: TempDir,
-        original_home: Option<String>,
-        original_userprofile: Option<String>,
+        _lock: crate::test_support::TestHomeSettingsLock,
+        original_home: Option<OsString>,
+        original_userprofile: Option<OsString>,
     }
 
     impl TempHome {
         fn new() -> Self {
             let dir = TempDir::new().expect("failed to create temp home");
-            let original_home = env::var("HOME").ok();
-            let original_userprofile = env::var("USERPROFILE").ok();
+            let lock = crate::test_support::lock_test_home_and_settings();
+            let original_home = env::var_os("HOME");
+            let original_userprofile = env::var_os("USERPROFILE");
 
             env::set_var("HOME", dir.path());
             env::set_var("USERPROFILE", dir.path());
+            crate::test_support::set_test_home_override(Some(dir.path()));
+            crate::settings::reload_test_settings();
 
             Self {
                 dir,
+                _lock: lock,
                 original_home,
                 original_userprofile,
             }
@@ -870,6 +915,11 @@ mod tests {
                 Some(value) => env::set_var("USERPROFILE", value),
                 None => env::remove_var("USERPROFILE"),
             }
+
+            crate::test_support::set_test_home_override(
+                self.original_home.as_deref().map(Path::new),
+            );
+            crate::settings::reload_test_settings();
         }
     }
 
@@ -879,6 +929,38 @@ mod tests {
             fs::create_dir_all(parent).expect("create parent dir");
         }
         fs::write(path, content).expect("write prompt");
+    }
+
+    fn seed_stale_test_home_with_gemini_override(home: &std::path::Path) {
+        let stale_gemini_dir = home.join("custom-gemini");
+        let _lock = crate::test_support::lock_test_home_and_settings();
+
+        crate::test_support::set_test_home_override(Some(home));
+        crate::settings::reload_test_settings();
+
+        let mut settings = crate::settings::AppSettings::default();
+        settings.gemini_config_dir = Some(stale_gemini_dir.to_string_lossy().into_owned());
+        settings.save().expect("save stale settings");
+        crate::settings::reload_test_settings();
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn temp_home_refreshes_test_home_override_and_settings_cache() {
+        let stale_home = TempDir::new().expect("failed to create stale home");
+        seed_stale_test_home_with_gemini_override(stale_home.path());
+
+        let home = TempHome::new();
+
+        assert_eq!(
+            crate::config::home_dir(),
+            Some(home.dir.path().to_path_buf())
+        );
+        assert_eq!(crate::settings::get_gemini_override_dir(), None);
+        assert_eq!(
+            crate::prompt_files::prompt_file_path(&AppType::Gemini).expect("gemini prompt path"),
+            home.dir.path().join(".gemini").join("GEMINI.md")
+        );
     }
 
     #[test]
@@ -1026,6 +1108,48 @@ mod tests {
                 .next()
                 .unwrap()
                 .enabled
+        );
+    }
+
+    #[test]
+    fn migrate_mcp_to_unified_keeps_openclaw_legacy_servers_unmigrated() {
+        let mut config = MultiAppConfig::default();
+        config.mcp.servers = None;
+        config.mcp.claude.servers.insert(
+            "claude-tool".to_string(),
+            json!({
+                "enabled": true,
+                "name": "Claude Tool",
+                "server": {"command": "claude-tool"}
+            }),
+        );
+        config.mcp.openclaw.servers.insert(
+            "openclaw-tool".to_string(),
+            json!({
+                "enabled": true,
+                "name": "OpenClaw Tool",
+                "server": {"command": "openclaw-tool"}
+            }),
+        );
+
+        let migrated = config
+            .migrate_mcp_to_unified()
+            .expect("mcp migration should succeed");
+
+        assert!(migrated);
+        let unified = config
+            .mcp
+            .servers
+            .as_ref()
+            .expect("unified servers should exist");
+        assert!(unified.contains_key("claude-tool"));
+        assert!(
+            !unified.contains_key("openclaw-tool"),
+            "OpenClaw MCP should remain in legacy storage until upstream supports it"
+        );
+        assert!(
+            config.mcp.openclaw.servers.contains_key("openclaw-tool"),
+            "OpenClaw legacy MCP entries should be preserved"
         );
     }
 }

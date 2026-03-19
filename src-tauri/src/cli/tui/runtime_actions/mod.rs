@@ -28,6 +28,15 @@ pub(crate) use helpers::{
     run_external_editor_for_current_editor,
 };
 
+fn normalize_openclaw_config_route(route: &super::route::Route) -> super::route::Route {
+    match route {
+        super::route::Route::ConfigOpenClawEnv
+        | super::route::Route::ConfigOpenClawTools
+        | super::route::Route::ConfigOpenClawAgents => super::route::Route::Config,
+        _ => route.clone(),
+    }
+}
+
 pub(super) struct RuntimeActionContext<'a> {
     terminal: &'a mut TuiTerminal,
     app: &'a mut App,
@@ -88,6 +97,13 @@ pub(crate) fn handle_action(
         Action::SetAppType(next) => {
             let next_data = UiData::load(&next)?;
             ctx.app.app_type = next;
+            ctx.app.route = normalize_openclaw_config_route(&ctx.app.route);
+            for route in &mut ctx.app.route_stack {
+                *route = normalize_openclaw_config_route(route);
+            }
+            while ctx.app.route_stack.last() == Some(&ctx.app.route) {
+                ctx.app.route_stack.pop();
+            }
             *ctx.data = next_data;
             ctx.app.reset_proxy_activity(
                 ctx.data.proxy.estimated_input_tokens_total,
@@ -149,6 +165,11 @@ pub(crate) fn handle_action(
         Action::EditorOpenExternal => editor::open_external(&mut ctx),
         Action::EditorSubmit { submit, content } => editor::submit(&mut ctx, submit, content),
         Action::ProviderSwitch { id } => providers::switch(&mut ctx, id),
+        Action::ProviderRemoveFromConfig { id } => providers::remove_from_config(&mut ctx, id),
+        Action::ProviderSetDefaultModel {
+            provider_id,
+            model_id,
+        } => providers::set_default_model(&mut ctx, provider_id, model_id),
         Action::ProviderSwitchForce { id } => providers::switch_force(&mut ctx, id),
         Action::ProviderImportLiveConfig => providers::import_live_config(&mut ctx),
         Action::ProviderDelete { id } => providers::delete(&mut ctx, id),
@@ -242,5 +263,99 @@ pub(crate) fn handle_action(
             ctx.update_check.cancel();
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_config::AppType;
+    use crate::cli::tui::app::App;
+    use crate::cli::tui::route::Route;
+    use crate::test_support::{
+        lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
+    };
+    use serial_test::serial;
+    use std::ffi::OsString;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    struct EnvGuard {
+        _lock: TestHomeSettingsLock,
+        old_home: Option<OsString>,
+        old_userprofile: Option<OsString>,
+    }
+
+    impl EnvGuard {
+        fn set_home(home: &Path) -> Self {
+            let lock = lock_test_home_and_settings();
+            let old_home = std::env::var_os("HOME");
+            let old_userprofile = std::env::var_os("USERPROFILE");
+            std::env::set_var("HOME", home);
+            std::env::set_var("USERPROFILE", home);
+            set_test_home_override(Some(home));
+            crate::settings::reload_test_settings();
+            Self {
+                _lock: lock,
+                old_home,
+                old_userprofile,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.old_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.old_userprofile {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            set_test_home_override(self.old_home.as_deref().map(Path::new));
+            crate::settings::reload_test_settings();
+        }
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn set_app_type_normalizes_openclaw_config_subroutes_back_to_config() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
+        let mut app = App::new(Some(AppType::OpenClaw));
+        app.route = Route::ConfigOpenClawTools;
+        app.route_stack.push(Route::Config);
+        let mut data = UiData::default();
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+
+        handle_action(
+            &mut terminal,
+            &mut app,
+            &mut data,
+            None,
+            None,
+            None,
+            None,
+            &mut proxy_loading,
+            None,
+            None,
+            &mut webdav_loading,
+            None,
+            &mut update_check,
+            None,
+            Action::SetAppType(AppType::Claude),
+        )
+        .expect("switch app type");
+
+        assert_eq!(app.app_type, AppType::Claude);
+        assert_eq!(app.route, Route::Config);
+        assert!(
+            app.route_stack.is_empty(),
+            "route stack should be normalized too so Back does not land on a duplicate config route"
+        );
     }
 }

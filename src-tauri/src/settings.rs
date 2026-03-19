@@ -1,3 +1,5 @@
+use crate::app_config::AppType;
+use crate::config::home_dir;
 use crate::error::AppError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -177,6 +179,18 @@ pub struct AppSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opencode_config_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openclaw_config_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_provider_claude: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_provider_codex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_provider_gemini: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_provider_opencode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_provider_openclaw: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     /// 是否开机自启
     #[serde(default)]
@@ -188,6 +202,8 @@ pub struct AppSettings {
     pub security: Option<SecuritySettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub webdav_sync: Option<WebDavSyncSettings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_retain_count: Option<u32>,
     /// Claude 自定义端点列表
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub custom_endpoints_claude: HashMap<String, CustomEndpoint>,
@@ -217,11 +233,18 @@ impl Default for AppSettings {
             codex_config_dir: None,
             gemini_config_dir: None,
             opencode_config_dir: None,
+            openclaw_config_dir: None,
+            current_provider_claude: None,
+            current_provider_codex: None,
+            current_provider_gemini: None,
+            current_provider_opencode: None,
+            current_provider_openclaw: None,
             language: None,
             launch_on_startup: false,
             skill_sync_method: crate::services::skill::SyncMethod::default(),
             security: None,
             webdav_sync: None,
+            backup_retain_count: None,
             custom_endpoints_claude: HashMap::new(),
             custom_endpoints_codex: HashMap::new(),
         }
@@ -232,7 +255,7 @@ impl AppSettings {
     fn settings_path() -> PathBuf {
         // settings.json 必须使用固定路径，不能被 app_config_dir 覆盖
         // 否则会造成循环依赖：读取 settings 需要知道路径，但路径在 settings 中
-        dirs::home_dir()
+        home_dir()
             .expect("无法获取用户主目录")
             .join(".cc-switch")
             .join("settings.json")
@@ -262,6 +285,13 @@ impl AppSettings {
 
         self.opencode_config_dir = self
             .opencode_config_dir
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string());
+
+        self.openclaw_config_dir = self
+            .openclaw_config_dir
             .as_ref()
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
@@ -322,17 +352,23 @@ fn settings_store() -> &'static RwLock<AppSettings> {
     STORE.get_or_init(|| RwLock::new(AppSettings::load()))
 }
 
+#[cfg(test)]
+pub(crate) fn reload_test_settings() {
+    let mut guard = settings_store().write().expect("写入设置锁失败");
+    *guard = AppSettings::load();
+}
+
 fn resolve_override_path(raw: &str) -> PathBuf {
     if raw == "~" {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = home_dir() {
             return home;
         }
     } else if let Some(stripped) = raw.strip_prefix("~/") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = home_dir() {
             return home.join(stripped);
         }
     } else if let Some(stripped) = raw.strip_prefix("~\\") {
-        if let Some(home) = dirs::home_dir() {
+        if let Some(home) = home_dir() {
             return home.join(stripped);
         }
     }
@@ -406,11 +442,77 @@ pub fn get_opencode_override_dir() -> Option<PathBuf> {
         .map(|p| resolve_override_path(p))
 }
 
+pub fn get_openclaw_override_dir() -> Option<PathBuf> {
+    let settings = settings_store().read().ok()?;
+    settings
+        .openclaw_config_dir
+        .as_ref()
+        .map(|p| resolve_override_path(p))
+}
+
+pub fn get_current_provider(app_type: &AppType) -> Option<String> {
+    let settings = settings_store().read().ok()?;
+    match app_type {
+        AppType::Claude => settings.current_provider_claude.clone(),
+        AppType::Codex => settings.current_provider_codex.clone(),
+        AppType::Gemini => settings.current_provider_gemini.clone(),
+        AppType::OpenCode => settings.current_provider_opencode.clone(),
+        AppType::OpenClaw => settings.current_provider_openclaw.clone(),
+    }
+}
+
+pub fn set_current_provider(app_type: &AppType, id: Option<&str>) -> Result<(), AppError> {
+    let mut settings = get_settings();
+
+    match app_type {
+        AppType::Claude => settings.current_provider_claude = id.map(|value| value.to_string()),
+        AppType::Codex => settings.current_provider_codex = id.map(|value| value.to_string()),
+        AppType::Gemini => settings.current_provider_gemini = id.map(|value| value.to_string()),
+        AppType::OpenCode => settings.current_provider_opencode = id.map(|value| value.to_string()),
+        AppType::OpenClaw => settings.current_provider_openclaw = id.map(|value| value.to_string()),
+    }
+
+    update_settings(settings)
+}
+
+pub fn get_effective_current_provider(
+    db: &crate::database::Database,
+    app_type: &AppType,
+) -> Result<Option<String>, AppError> {
+    if let Some(local_id) = get_current_provider(app_type) {
+        let providers = db.get_all_providers(app_type.as_str())?;
+        if providers.contains_key(&local_id) {
+            return Ok(Some(local_id));
+        }
+
+        log::warn!(
+            "本地 settings 中的供应商 {} ({}) 在数据库中不存在，将清理并 fallback 到数据库",
+            local_id,
+            app_type.as_str()
+        );
+        set_current_provider(app_type, None)?;
+    }
+
+    db.get_current_provider(app_type.as_str())
+}
+
 pub fn get_skill_sync_method() -> crate::services::skill::SyncMethod {
     settings_store()
         .read()
         .map(|s| s.skill_sync_method)
         .unwrap_or_default()
+}
+
+pub fn effective_backup_retain_count() -> usize {
+    settings_store()
+        .read()
+        .map(|settings| {
+            settings
+                .backup_retain_count
+                .map(|count| usize::try_from(count).unwrap_or(usize::MAX).max(1))
+                .unwrap_or(10)
+        })
+        .unwrap_or(10)
 }
 
 pub fn set_skill_sync_method(method: crate::services::skill::SyncMethod) -> Result<(), AppError> {

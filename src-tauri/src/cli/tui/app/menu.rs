@@ -62,7 +62,11 @@ impl App {
             Route::Providers | Route::ProviderDetail { .. } => NavItem::Providers,
             Route::Mcp => NavItem::Mcp,
             Route::Prompts => NavItem::Prompts,
-            Route::Config | Route::ConfigWebDav => NavItem::Config,
+            Route::Config
+            | Route::ConfigOpenClawEnv
+            | Route::ConfigOpenClawTools
+            | Route::ConfigOpenClawAgents
+            | Route::ConfigWebDav => NavItem::Config,
             Route::Skills
             | Route::SkillsDiscover
             | Route::SkillsRepos
@@ -350,6 +354,9 @@ impl App {
             Route::Mcp => self.on_mcp_key(key, data),
             Route::Prompts => self.on_prompts_key(key, data),
             Route::Config => self.on_config_key(key, data),
+            Route::ConfigOpenClawEnv => self.on_config_openclaw_env_key(key, data),
+            Route::ConfigOpenClawTools => self.on_config_openclaw_tools_key(key, data),
+            Route::ConfigOpenClawAgents => self.on_config_openclaw_agents_key(key, data),
             Route::ConfigWebDav => self.on_config_webdav_key(key, data),
             Route::Skills => self.on_skills_installed_key(key, data),
             Route::SkillsDiscover => self.on_skills_discover_key(key),
@@ -365,7 +372,7 @@ impl App {
         }
     }
     pub(crate) fn clamp_selections(&mut self, data: &UiData) {
-        let providers_len = visible_providers(&self.filter, data).len();
+        let providers_len = visible_providers(&self.app_type, &self.filter, data).len();
         if providers_len == 0 {
             self.provider_idx = 0;
         } else {
@@ -416,7 +423,7 @@ impl App {
             self.skills_unmanaged_idx = self.skills_unmanaged_idx.min(unmanaged_len - 1);
         }
 
-        let config_len = visible_config_items(&self.filter).len();
+        let config_len = visible_config_items(&self.filter, &self.app_type).len();
         if config_len == 0 {
             self.config_idx = 0;
         } else {
