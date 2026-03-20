@@ -253,6 +253,7 @@ pub(crate) fn handle_action(
                 .push_toast(texts::language_changed(), ToastKind::Success);
             Ok(())
         }
+        Action::SetVisibleApps { .. } => Ok(()),
         Action::CheckUpdate => updates::check(&mut ctx),
         Action::ConfirmUpdate => updates::confirm(&mut ctx),
         Action::CancelUpdate => {

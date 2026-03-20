@@ -241,6 +241,14 @@ mod tests {
     fn app_cycles_left_right() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());
+        crate::settings::set_visible_apps(crate::settings::VisibleApps {
+            claude: true,
+            codex: true,
+            gemini: true,
+            opencode: true,
+            openclaw: true,
+        })
+        .expect("save visible apps");
         let mut app = App::new(Some(AppType::Claude));
         assert!(matches!(
             app.on_key(key(KeyCode::Char(']')), &data()),
@@ -257,6 +265,14 @@ mod tests {
     fn app_cycles_through_opencode() {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = EnvGuard::set_home(temp_home.path());
+        crate::settings::set_visible_apps(crate::settings::VisibleApps {
+            claude: true,
+            codex: true,
+            gemini: true,
+            opencode: true,
+            openclaw: true,
+        })
+        .expect("save visible apps");
         let mut app = App::new(Some(AppType::Gemini));
         assert!(matches!(
             app.on_key(key(KeyCode::Char(']')), &data()),
@@ -270,7 +286,7 @@ mod tests {
         ));
         assert!(matches!(
             app.on_key(key(KeyCode::Char('[')), &data()),
-            Action::SetAppType(AppType::Codex)
+            Action::SetAppType(AppType::Gemini)
         ));
 
         let mut app = App::new(Some(AppType::OpenClaw));
@@ -2436,6 +2452,87 @@ mod tests {
                 .any(|item| matches!(item, SettingsItem::Proxy)),
             "Settings should expose a local proxy entry"
         );
+    }
+
+    #[test]
+    fn settings_menu_exposes_visible_apps_item() {
+        assert!(
+            SettingsItem::ALL
+                .iter()
+                .any(|item| matches!(item, SettingsItem::VisibleApps)),
+            "Settings should expose a visible apps entry"
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn settings_visible_apps_item_opens_picker_overlay() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let expected = crate::settings::get_visible_apps();
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+        app.settings_idx = SettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, SettingsItem::VisibleApps))
+            .expect("VisibleApps missing from SettingsItem::ALL");
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::VisibleAppsPicker { selected, apps }
+                if *selected == app_type_picker_index(&app.app_type) && apps == &expected
+        ));
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn visible_apps_picker_rejects_zero_selection_without_closing() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        crate::settings::set_visible_apps(crate::settings::VisibleApps {
+            claude: true,
+            codex: false,
+            gemini: false,
+            opencode: false,
+            openclaw: false,
+        })
+        .expect("save visible apps");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+        app.overlay = Overlay::VisibleAppsPicker {
+            selected: 0,
+            apps: crate::settings::get_visible_apps(),
+        };
+
+        let data = UiData::default();
+        let toggle_action = app.on_key(key(KeyCode::Char('x')), &data);
+        assert!(matches!(toggle_action, Action::None));
+
+        let action = app.on_key(key(KeyCode::Enter), &data);
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            &app.overlay,
+            Overlay::VisibleAppsPicker { apps, .. }
+                if !apps.claude
+                    && !apps.codex
+                    && !apps.gemini
+                    && !apps.opencode
+                    && !apps.openclaw
+        ));
+        assert!(matches!(
+            app.toast.as_ref(),
+            Some(Toast {
+                message,
+                kind: ToastKind::Warning,
+                ..
+            }) if message == texts::tui_toast_visible_apps_zero_selection_warning()
+        ));
     }
 
     #[test]
