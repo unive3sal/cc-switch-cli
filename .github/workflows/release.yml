@@ -317,7 +317,7 @@ jobs:
 
             All-in-One Assistant for Claude Code, Codex, Gemini, OpenCode & OpenClaw
 
-            New in this release: OpenClaw support, tighter upstream parity, and safer WebDAV / TUI behavior.
+            See `CHANGELOG.md` and the README in this tag for the latest release notes and upgrade highlights.
 
             ### 📦 下载 / Downloads
 
