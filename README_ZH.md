@@ -2,7 +2,7 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.1.1-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.2.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -26,16 +26,16 @@
 
 ---
 
-## 🆕 5.1.1 更新内容
+## 🆕 5.2.0 更新内容
 
 <div align="center">
-  <h3><strong>🦞 支持 OpenClaw 切换、可见应用控制与 TUI 打磨</strong></h3>
+  <h3><strong>🦞 增强 OpenClaw 支持、Workspace 管理与安装流程更新</strong></h3>
 </div>
 
-- 🦞 现在支持在 TUI 中切换 OpenClaw。
-- 设置里新增了可见应用控制。
-- 可见应用设置现在会持久化保存。
-- 顶部标签、键盘切换和终端显示在 5.1.1 中都更顺手了。
+- 🦞 进一步增强了对 OpenClaw 的支持，覆盖切换、Workspace 管理、Daily Memory 和独立配置路由。
+- 新增了面向 Workspace 文件、记忆笔记和 OpenClaw 配置操作的命令与 TUI 流程。
+- 安装脚本现在支持指定版本安装，并会自动为裸版本号补上 `v` 前缀。
+- 修复了 provider meta 残留配置清理问题，以及近期 provider / TUI 流程里的重复字段保存失败问题。
 
 ---
 

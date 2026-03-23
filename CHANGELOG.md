@@ -7,6 +7,47 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.2.0] - 2026-03-23
+
+### Added
+
+- **OpenClaw / Workspace**: Add OpenClaw workspace management across the TUI and CLI, including file actions, daily memory flows, and dedicated config routes for `Workspace`, `Env`, `Tools`, and `Agents` work.
+- **Install Script**: Add version selection support so the installer can target a specific release.
+
+### Changed
+
+- **OpenClaw / TUI**: Expand OpenClaw support from basic provider switching into a fuller workspace and config workflow.
+- **Docs**: Refresh the README release highlights for 5.2.0 and add an OpenClaw config interaction guideline for follow-up work.
+- **Install Script**: Auto-prefix bare version strings with `v` during install selection.
+
+### Fixed
+
+- **TUI**: Remove duplicate meta key handling that could break provider edit saves.
+- **Provider**: Clean up stale meta config and fix duplicate common-config field serialization.
+
+### Commits (since v5.1.1)
+
+- 6f349dd Merge branch 'feat/openclaw-workspace-management'
+- 998287a docs: add OpenClaw TUI config interaction guidelines
+- 3df5baf feat(openclaw): complete workspace management and config flows
+- 927411b fix(install): add trailing newline and auto-prefix version with v
+- 478f53f feat: add version select support for install script (#72)
+- 9a4a475 fix(tui): remove duplicate meta key causing provider edit save failure (#71) (#74)
+- a2227df feat:support-version-selection-in-install.sh
+- afe1219 Merge pull request #70 from 1-bytes/fix/common-config-alias-cleanup
+- 9e73b72 Fix common config alias duplication in provider meta
+- a65031d Merge pull request #69 from opposj/main
+- c1fe307 fix(provider): remove staled meta config
+- 386ff92 docs(readme): revise v5.1.1 highlights
+- 7079e29 docs(readme): add OpenClaw emoji to v5.1.1 notes
+
+### Thanks
+
+- Thanks `@saladday` for shipping the OpenClaw workspace and config release, tightening the install flow, and keeping the docs current.
+- Thanks `@XyzenSun` for the version-select installer work in PR #72.
+- Thanks `@1-bytes` for fixing duplicate common-config field serialization in PR #70.
+- Thanks `@opposj` for removing stale provider meta config in PR #69.
+
 ## [5.1.1] - 2026-03-20
 
 ### Added
