@@ -8,6 +8,7 @@ TARGET="${INSTALL_DIR}/${BIN_NAME}"
 RELEASES_URL="https://github.com/${REPO}/releases"
 FORCE_OVERWRITE="${CC_SWITCH_FORCE:-0}"
 LINUX_LIBC="${CC_SWITCH_LINUX_LIBC:-auto}"
+VERSION="${1:-latest}"
 
 TMP_DIR=""
 ASSET_NAME=""
@@ -219,7 +220,11 @@ download() {
   local asset_name url dest
 
   for asset_name in "${ASSET_CANDIDATES[@]}"; do
-    url="${RELEASES_URL}/latest/download/${asset_name}"
+    if [[ "${VERSION}" == "latest" ]]; then
+      url="${RELEASES_URL}/latest/download/${asset_name}"
+    else
+      url="${RELEASES_URL}/download/${VERSION}/${asset_name}"
+    fi
     dest="${TMP_DIR}/${asset_name}"
 
     info "Downloading ${asset_name}"
