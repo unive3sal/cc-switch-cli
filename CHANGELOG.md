@@ -7,6 +7,32 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.2.1] - 2026-03-24
+
+### Changed
+
+- **OpenClaw / TUI**: Refine readability across the OpenClaw config routes, including clearer file-status copy, cleaner config-page hierarchy, and a more readable agents flow.
+- **README**: Carry the 5.2.x release highlights forward to 5.2.1 without rewriting the existing What's New section.
+- **Docs**: Capture the shared header-summary design principles so future OpenClaw and OpenCode UI changes can reuse the same reasoning.
+
+### Fixed
+
+- **Header / OpenClaw / OpenCode**: Stop rendering unsupported proxy capability as `Proxy: Off`, keep the rightmost status badge focused on each app's real summary field, and make the OpenClaw default-model state easier to read.
+
+### Commits (since v5.2.0)
+
+- 17c32b3 docs: capture header summary design principles
+- 48b9186 fix(openclaw): clarify header status badges
+- 722c842 fix(openclaw): improve config route readability
+- 3941cfc docs: update openclaw agents readability guidance
+- ba65a76 fix(openclaw): improve agents config readability
+- 71f4951 fix(openclaw): align Exists/Missing status labels in workspace files list
+
+### Thanks
+
+- Thanks `@saladday` for the OpenClaw readability pass across config routes, header summaries, and release docs.
+- Thanks to everyone who sent feedback on the OpenClaw config flow and header wording.
+
 ## [5.2.0] - 2026-03-23
 
 ### Added
