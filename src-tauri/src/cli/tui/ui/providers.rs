@@ -354,4 +354,41 @@ mod tests {
 
         assert!(!all.contains(texts::tui_key_launch_temp()), "{all}");
     }
+
+    #[test]
+    fn claude_provider_detail_key_bar_shows_launch_temp_hint() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::ProviderDetail {
+            id: "p1".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let data = super::super::tests::minimal_data(&app.app_type);
+        let all = all_text(&super::super::tests::render(&app, &data));
+
+        assert!(
+            all.contains(&format!("o {}", texts::tui_key_launch_temp())),
+            "{all}"
+        );
+    }
+
+    #[test]
+    fn codex_provider_detail_key_bar_hides_launch_temp_hint() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+
+        let mut app = App::new(Some(AppType::Codex));
+        app.route = Route::ProviderDetail {
+            id: "p1".to_string(),
+        };
+        app.focus = Focus::Content;
+
+        let data = super::super::tests::minimal_data(&app.app_type);
+        let all = all_text(&super::super::tests::render(&app, &data));
+
+        assert!(!all.contains(texts::tui_key_launch_temp()), "{all}");
+    }
 }
