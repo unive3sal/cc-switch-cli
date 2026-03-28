@@ -1,9 +1,10 @@
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
-use crate::config::write_json_file;
 use crate::error::AppError;
 use crate::provider::Provider;
 use serde_json::json;
@@ -16,6 +17,12 @@ use super::RuntimeActionContext;
 struct PreparedClaudeLaunch {
     executable: PathBuf,
     settings_path: PathBuf,
+}
+
+impl PreparedClaudeLaunch {
+    fn cleanup_settings_file(&self) -> Result<(), AppError> {
+        cleanup_temp_settings_file(&self.settings_path)
+    }
 }
 
 pub(super) fn launch(ctx: &mut RuntimeActionContext<'_>, id: String) -> Result<(), AppError> {
@@ -98,9 +105,12 @@ fn handoff_to_claude(
     use std::os::unix::process::CommandExt;
 
     terminal.with_terminal_restored_for_handoff(|| {
-        let exec_err = std::process::Command::new(&prepared.executable)
-            .arg("--settings")
+        let exec_err = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("trap 'rm -f -- \"$1\"' EXIT; \"$2\" --settings \"$1\"")
+            .arg("cc-switch-claude-temp-launch")
             .arg(&prepared.settings_path)
+            .arg(&prepared.executable)
             .exec();
 
         Err(AppError::localized(
@@ -150,8 +160,19 @@ where
             )
         })?;
     let prepared = prepare_launch_with(&provider, temp_dir, resolve_claude_binary)?;
+    let handoff_result = handoff(ctx.terminal, &prepared);
+    let cleanup_result = prepared.cleanup_settings_file();
 
-    handoff(ctx.terminal, &prepared)
+    match (handoff_result, cleanup_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Ok(()), Err(cleanup_err)) => Err(cleanup_err),
+        (Err(err), Ok(())) => Err(err),
+        (Err(err), Err(cleanup_err)) => Err(AppError::localized(
+            "claude.temp_launch_cleanup_failed",
+            format!("启动 Claude 失败: {err}；同时清理临时设置文件失败: {cleanup_err}"),
+            format!("Failed to launch Claude: {err}; also failed to remove the temporary settings file: {cleanup_err}"),
+        )),
+    }
 }
 
 fn write_temp_settings_file(
@@ -169,9 +190,56 @@ fn write_temp_settings_file(
         std::process::id()
     );
     let path = temp_dir.join(filename);
+    let content =
+        serde_json::to_vec_pretty(settings).map_err(|source| AppError::JsonSerialize { source })?;
 
-    write_json_file(&path, settings)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| AppError::io(parent, err))?;
+    }
+
+    let mut file = create_secret_temp_file(&path)?;
+    file.write_all(&content)
+        .and_then(|()| file.flush())
+        .map_err(|err| AppError::io(&path, err))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .map_err(|err| AppError::io(&path, err))?;
+    }
+
     Ok(path)
+}
+
+#[cfg(unix)]
+fn create_secret_temp_file(path: &Path) -> Result<File, AppError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|err| AppError::io(path, err))
+}
+
+#[cfg(not(unix))]
+fn create_secret_temp_file(path: &Path) -> Result<File, AppError> {
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|err| AppError::io(path, err))
+}
+
+fn cleanup_temp_settings_file(path: &Path) -> Result<(), AppError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(AppError::io(path, err)),
+    }
 }
 
 fn sanitize_filename_fragment(value: &str) -> String {
@@ -301,6 +369,21 @@ mod tests {
                 }
             })
         );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let mode = std::fs::metadata(&prepared.settings_path)
+                .expect("stat temp settings")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "temp settings file should use owner-only permissions"
+            );
+        }
     }
 
     #[test]
@@ -349,13 +432,17 @@ mod tests {
                 ),
             ],
         );
+        let captured_settings_path = std::cell::RefCell::new(None::<PathBuf>);
 
         launch_with(
             &mut fixture.ctx(),
             "candidate".to_string(),
             temp_dir.path(),
             || Ok(PathBuf::from("/usr/bin/claude")),
-            |_, _| Err(AppError::Message("launch exploded".to_string())),
+            |_, prepared| {
+                captured_settings_path.replace(Some(prepared.settings_path.clone()));
+                Err(AppError::Message("launch exploded".to_string()))
+            },
         )
         .expect("launch failure should stay in the TUI");
 
@@ -369,6 +456,13 @@ mod tests {
             ),
             "expected temp launch failure toast, got {:?}",
             fixture.app.toast
+        );
+        let settings_path = captured_settings_path
+            .into_inner()
+            .expect("handoff should observe the temp settings path");
+        assert!(
+            !settings_path.exists(),
+            "temp settings file should be removed after a failed launch"
         );
     }
 

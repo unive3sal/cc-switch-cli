@@ -451,4 +451,37 @@ mod tests {
             "handoff recovery should perform a second activation after the restore failure"
         );
     }
+
+    #[test]
+    fn with_terminal_restored_for_handoff_reactivates_after_callback_error() {
+        let mut terminal = TuiTerminal::new_for_test().expect("create test terminal");
+        terminal
+            .activate_best_effort()
+            .expect("activate test terminal first");
+
+        let err = terminal
+            .with_terminal_restored_for_handoff(|| {
+                Err::<(), _>(crate::error::AppError::localized(
+                    "test.handoff_failure",
+                    "模拟 handoff 失败".to_string(),
+                    "simulated handoff failure".to_string(),
+                ))
+            })
+            .expect_err("callback failure should be returned");
+
+        assert!(
+            err.to_string().contains("handoff failure")
+                || err.to_string().contains("simulated handoff failure"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            terminal.is_active_for_test(),
+            "handoff callback errors after restore should reactivate the TUI"
+        );
+        assert_eq!(
+            terminal.activation_count_for_test(),
+            2,
+            "handoff recovery should perform a second activation after callback failure"
+        );
+    }
 }
