@@ -530,6 +530,41 @@ url = "https://example.com"
 }
 
 #[test]
+fn mcp_env_import_from_codex_preserves_env_table() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let path = cc_switch_lib::get_codex_config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).expect("create codex dir");
+    }
+    fs::write(
+        &path,
+        r#"[mcp_servers.echo_server]
+type = "stdio"
+command = "echo"
+
+[mcp_servers.echo_server.env]
+API_KEY = "secret"
+PROJECT_ROOT = ""
+"#,
+    )
+    .expect("write codex config");
+
+    let mut config = MultiAppConfig::default();
+    cc_switch_lib::import_from_codex(&mut config).expect("import codex");
+
+    let entry = config
+        .mcp
+        .servers
+        .as_ref()
+        .expect("unified servers should exist")
+        .get("echo_server")
+        .expect("echo server");
+    assert_eq!(entry.server["env"]["API_KEY"], "secret");
+    assert_eq!(entry.server["env"]["PROJECT_ROOT"], "");
+}
+
+#[test]
 fn import_from_codex_merges_into_existing_entries() {
     let _guard = lock_test_mutex();
     reset_test_fs();

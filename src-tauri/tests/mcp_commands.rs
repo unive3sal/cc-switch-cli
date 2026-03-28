@@ -319,7 +319,11 @@ fn set_mcp_enabled_for_codex_writes_live_config() {
             name: "Codex Server".to_string(),
             server: json!({
                 "type": "stdio",
-                "command": "echo"
+                "command": "echo",
+                "env": {
+                    "API_KEY": "secret",
+                    "PROJECT_ROOT": ""
+                }
             }),
             apps: McpApps {
                 claude: false,
@@ -363,6 +367,18 @@ fn set_mcp_enabled_for_codex_writes_live_config() {
     assert!(
         toml_text.contains("codex-server"),
         "codex config should include the enabled server definition"
+    );
+    assert!(
+        toml_text.contains("[mcp_servers.codex-server.env]"),
+        "codex config should include env table for enabled server"
+    );
+    assert!(
+        toml_text.contains("API_KEY = \"secret\""),
+        "codex config should include API_KEY env entry"
+    );
+    assert!(
+        toml_text.contains("PROJECT_ROOT = \"\""),
+        "codex config should preserve empty env values"
     );
 }
 
