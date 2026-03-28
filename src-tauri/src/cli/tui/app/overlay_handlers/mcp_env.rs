@@ -33,7 +33,7 @@ impl App {
             }
             KeyCode::Down => {
                 if !mcp.env_rows.is_empty() {
-                    *selected = (*selected + 1).min(mcp.env_rows.len() - 1);
+                    *selected = selected.saturating_add(1).min(mcp.env_rows.len() - 1);
                 }
                 Action::None
             }
@@ -76,11 +76,15 @@ impl App {
 
         match key.code {
             KeyCode::Esc => {
-                let selected = match (&self.overlay, self.form.as_ref()) {
-                    (Overlay::McpEnvEntryEditor(editor), Some(FormState::McpAdd(mcp))) => editor
+                let Some(FormState::McpAdd(mcp)) = self.form.as_ref() else {
+                    self.overlay = Overlay::None;
+                    return Some(Action::None);
+                };
+
+                let selected = match &self.overlay {
+                    Overlay::McpEnvEntryEditor(editor) => editor
                         .return_selected
                         .min(mcp.env_rows.len().saturating_sub(1)),
-                    (Overlay::McpEnvEntryEditor(editor), _) => editor.return_selected,
                     _ => 0,
                 };
                 self.overlay = Overlay::McpEnvPicker { selected };

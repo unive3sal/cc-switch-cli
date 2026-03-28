@@ -1832,6 +1832,44 @@ mod tests {
     }
 
     #[test]
+    fn mcp_env_picker_add_save_keeps_selection_on_new_key() {
+        let mut app = App::new(Some(AppType::Claude));
+        let mut form = McpAddFormState::new();
+        form.focus = FormFocus::Fields;
+        form.env_rows.push(McpEnvVarRow {
+            key: "A_KEY".to_string(),
+            value: "a".to_string(),
+        });
+        app.form = Some(FormState::McpAdd(form));
+        app.overlay = Overlay::McpEnvPicker { selected: 0 };
+
+        app.on_key(key(KeyCode::Char('a')), &UiData::default());
+        for c in ['B', '_', 'K', 'E', 'Y'] {
+            app.on_key(key(KeyCode::Char(c)), &UiData::default());
+        }
+        app.on_key(key(KeyCode::Tab), &UiData::default());
+        for c in ['v', 'a', 'l'] {
+            app.on_key(key(KeyCode::Char(c)), &UiData::default());
+        }
+        app.on_key(key(KeyCode::Enter), &UiData::default());
+
+        let selected = match &app.overlay {
+            Overlay::McpEnvPicker { selected } => *selected,
+            other => panic!("expected MCP env picker, got {other:?}"),
+        };
+        let form = match app.form.as_ref() {
+            Some(FormState::McpAdd(form)) => form,
+            other => panic!("expected MCP form, got {other:?}"),
+        };
+        let new_idx = form
+            .env_rows
+            .iter()
+            .position(|row| row.key == "B_KEY" && row.value == "val")
+            .expect("new env row should be saved");
+        assert_eq!(selected, new_idx);
+    }
+
+    #[test]
     fn mcp_env_editor_rejects_blank_and_duplicate_keys() {
         let mut app = App::new(Some(AppType::Claude));
         let mut form = McpAddFormState::new();
@@ -1912,6 +1950,23 @@ mod tests {
 
         app.on_key(key(KeyCode::Esc), &UiData::default());
         assert!(matches!(app.overlay, Overlay::McpEnvPicker { selected: 1 }));
+    }
+
+    #[test]
+    fn mcp_env_editor_esc_without_form_closes_overlay() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.form = None;
+        app.overlay = Overlay::McpEnvEntryEditor(McpEnvEntryEditorState {
+            row: None,
+            return_selected: 0,
+            field: McpEnvEditorField::Key,
+            key: TextInput::new("K"),
+            value: TextInput::new("V"),
+        });
+
+        let action = app.on_key(key(KeyCode::Esc), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(app.overlay, Overlay::None));
     }
 
     #[test]
