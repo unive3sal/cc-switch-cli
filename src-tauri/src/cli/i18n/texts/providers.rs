@@ -1051,3 +1051,23 @@ pub fn tui_settings_proxy_listen_port_prompt() -> &'static str {
         "Enter listen port (1024-65535)"
     }
 }
+
+pub fn tui_settings_openclaw_config_dir_label() -> &'static str {
+    if is_chinese() {
+        "OpenClaw 配置目录"
+    } else {
+        "OpenClaw Config Directory"
+    }
+}
+
+pub fn tui_settings_openclaw_config_dir_prompt() -> &'static str {
+    if is_chinese() {
+        "输入 OpenClaw 配置目录；留空恢复默认 ~/.openclaw"
+    } else {
+        "Enter the OpenClaw config directory; leave empty to use ~/.openclaw"
+    }
+}
+
+pub fn tui_settings_openclaw_config_dir_default_value() -> &'static str {
+    "Default (~/.openclaw)"
+}

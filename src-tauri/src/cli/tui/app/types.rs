@@ -89,6 +89,7 @@ pub enum TextSubmit {
     ConfigBackupName,
     SettingsProxyListenAddress,
     SettingsProxyListenPort,
+    SettingsOpenClawConfigDir,
     SkillsInstallSpec,
     SkillsDiscoverQuery,
     SkillsRepoAdd,

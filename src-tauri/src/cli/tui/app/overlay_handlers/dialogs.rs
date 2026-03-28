@@ -215,6 +215,15 @@ impl App {
             TextSubmit::SettingsProxyListenPort => {
                 self.handle_settings_proxy_listen_port_submit(data, raw)
             }
+            TextSubmit::SettingsOpenClawConfigDir => {
+                let trimmed = raw.trim().to_string();
+                let path = if trimmed.is_empty() {
+                    None
+                } else {
+                    Some(trimmed)
+                };
+                Action::SetOpenClawConfigDir { path }
+            }
             TextSubmit::SkillsInstallSpec => {
                 if raw.is_empty() {
                     self.push_toast(texts::tui_toast_skill_spec_empty(), ToastKind::Warning);

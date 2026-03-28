@@ -702,6 +702,19 @@ impl App {
                     };
                     Action::None
                 }
+                Some(SettingsItem::OpenClawConfigDir) => {
+                    let buffer = crate::settings::get_settings()
+                        .openclaw_config_dir
+                        .unwrap_or_default();
+                    self.overlay = Overlay::TextInput(TextInputState {
+                        title: texts::tui_settings_openclaw_config_dir_label().to_string(),
+                        prompt: texts::tui_settings_openclaw_config_dir_prompt().to_string(),
+                        buffer,
+                        submit: TextSubmit::SettingsOpenClawConfigDir,
+                        secret: false,
+                    });
+                    Action::None
+                }
                 Some(SettingsItem::SkipClaudeOnboarding) => {
                     let current = crate::settings::get_skip_claude_onboarding();
                     let next = !current;

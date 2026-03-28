@@ -69,6 +69,29 @@ struct PostCommitAction {
 }
 
 impl ProviderService {
+    pub fn sync_openclaw_to_live(state: &AppState) -> Result<(), AppError> {
+        let (providers, snippet) = {
+            let guard = state.config.read().map_err(AppError::from)?;
+            let Some(manager) = guard.get_manager(&AppType::OpenClaw) else {
+                return Ok(());
+            };
+
+            (
+                manager.providers.values().cloned().collect::<Vec<_>>(),
+                guard
+                    .common_config_snippets
+                    .get(&AppType::OpenClaw)
+                    .cloned(),
+            )
+        };
+
+        for provider in &providers {
+            Self::write_live_snapshot(&AppType::OpenClaw, provider, snippet.as_deref(), true)?;
+        }
+
+        Ok(())
+    }
+
     pub(crate) fn valid_openclaw_live_provider_ids() -> Result<Option<HashSet<String>>, AppError> {
         if !crate::openclaw_config::get_openclaw_config_path().exists() {
             return Ok(None);

@@ -172,6 +172,9 @@ pub enum Action {
     SetProxyListenPort {
         port: u16,
     },
+    SetOpenClawConfigDir {
+        path: Option<String>,
+    },
     SetProxyTakeover {
         app_type: AppType,
         enabled: bool,
@@ -335,6 +338,7 @@ impl ConfigItem {
 pub enum SettingsItem {
     Language,
     VisibleApps,
+    OpenClawConfigDir,
     SkipClaudeOnboarding,
     ClaudePluginIntegration,
     Proxy,
@@ -342,9 +346,10 @@ pub enum SettingsItem {
 }
 
 impl SettingsItem {
-    pub const ALL: [SettingsItem; 6] = [
+    pub const ALL: [SettingsItem; 7] = [
         SettingsItem::Language,
         SettingsItem::VisibleApps,
+        SettingsItem::OpenClawConfigDir,
         SettingsItem::SkipClaudeOnboarding,
         SettingsItem::ClaudePluginIntegration,
         SettingsItem::Proxy,

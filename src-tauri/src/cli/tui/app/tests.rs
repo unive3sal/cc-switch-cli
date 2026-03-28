@@ -6961,6 +6961,81 @@ mod tests {
     }
 
     #[test]
+    fn settings_menu_exposes_openclaw_config_dir_item() {
+        assert!(
+            SettingsItem::ALL
+                .iter()
+                .any(|item| matches!(item, SettingsItem::OpenClawConfigDir)),
+            "Settings should expose an OpenClaw config directory entry"
+        );
+    }
+
+    #[test]
+    #[serial(home_settings)]
+    fn settings_openclaw_config_dir_item_opens_text_input() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+        let mut settings = crate::settings::get_settings();
+        settings.openclaw_config_dir = Some(r"\\wsl$\Ubuntu\home\demo\.openclaw".to_string());
+        crate::settings::update_settings(settings).expect("save openclaw override");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+        app.settings_idx = SettingsItem::ALL
+            .iter()
+            .position(|item| matches!(item, SettingsItem::OpenClawConfigDir))
+            .expect("OpenClawConfigDir missing from SettingsItem::ALL");
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            app.overlay,
+            Overlay::TextInput(TextInputState {
+                submit: TextSubmit::SettingsOpenClawConfigDir,
+                buffer,
+                ..
+            }) if buffer == r"\\wsl$\Ubuntu\home\demo\.openclaw"
+        ));
+    }
+
+    #[test]
+    fn settings_openclaw_config_dir_text_submit_emits_action() {
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Settings;
+        app.focus = Focus::Content;
+
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "OpenClaw Config Directory".to_string(),
+            prompt: "path".to_string(),
+            buffer: r"\\wsl$\Ubuntu\home\demo\.openclaw".to_string(),
+            submit: TextSubmit::SettingsOpenClawConfigDir,
+            secret: false,
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(
+            action,
+            Action::SetOpenClawConfigDir { path: Some(path) }
+                if path == r"\\wsl$\Ubuntu\home\demo\.openclaw"
+        ));
+
+        app.overlay = Overlay::TextInput(TextInputState {
+            title: "OpenClaw Config Directory".to_string(),
+            prompt: "path".to_string(),
+            buffer: "   ".to_string(),
+            submit: TextSubmit::SettingsOpenClawConfigDir,
+            secret: false,
+        });
+
+        let action = app.on_key(key(KeyCode::Enter), &UiData::default());
+        assert!(matches!(
+            action,
+            Action::SetOpenClawConfigDir { path: None }
+        ));
+    }
+
+    #[test]
     #[serial(home_settings)]
     fn settings_visible_apps_item_opens_picker_overlay() {
         let temp_home = TempDir::new().expect("create temp home");

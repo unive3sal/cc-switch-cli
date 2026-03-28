@@ -763,6 +763,54 @@ fn settings_page_shows_visible_apps_row_value() {
 }
 
 #[test]
+#[serial(home_settings)]
+fn settings_page_shows_openclaw_config_dir_default_value() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(
+        all.contains(texts::tui_settings_openclaw_config_dir_label()),
+        "{all}"
+    );
+    assert!(
+        all.contains(texts::tui_settings_openclaw_config_dir_default_value()),
+        "{all}"
+    );
+}
+
+#[test]
+#[serial(home_settings)]
+fn settings_page_shows_openclaw_config_dir_override_value() {
+    let _lock = lock_env();
+    let _no_color = EnvGuard::remove("NO_COLOR");
+    let temp_home = TempDir::new().expect("create temp home");
+    let _home = SettingsEnvGuard::set_home(temp_home.path());
+    let mut settings = crate::settings::get_settings();
+    settings.openclaw_config_dir = Some(r"\\wsl$\Ubuntu\home\demo\.openclaw".to_string());
+    crate::settings::update_settings(settings).expect("save openclaw override");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Settings;
+    app.focus = Focus::Content;
+
+    let all = all_text(&render(&app, &minimal_data(&app.app_type)));
+
+    assert!(
+        all.contains(texts::tui_settings_openclaw_config_dir_label()),
+        "{all}"
+    );
+    assert!(all.contains(r"\\wsl$\Ubuntu\home\demo\.openclaw"), "{all}");
+}
+
+#[test]
 fn zero_selection_warning_toast_renders_after_picker_rejection() {
     let _lock = lock_env();
     let _no_color = EnvGuard::remove("NO_COLOR");

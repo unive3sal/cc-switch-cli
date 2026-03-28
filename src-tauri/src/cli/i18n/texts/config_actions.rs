@@ -55,6 +55,30 @@ pub fn tui_toast_proxy_settings_stop_before_edit() -> &'static str {
     }
 }
 
+pub fn tui_toast_openclaw_config_dir_saved() -> &'static str {
+    if is_chinese() {
+        "OpenClaw 配置目录已保存。"
+    } else {
+        "OpenClaw config directory saved."
+    }
+}
+
+pub fn tui_toast_openclaw_config_dir_sync_skipped() -> &'static str {
+    if is_chinese() {
+        "目标 OpenClaw 目录尚未初始化；已保存设置，但暂未同步 live 配置。"
+    } else {
+        "The target OpenClaw directory is not initialized yet; the setting was saved but live sync was skipped."
+    }
+}
+
+pub fn tui_toast_openclaw_config_dir_sync_failed(err: &str) -> String {
+    if is_chinese() {
+        format!("OpenClaw 配置目录已保存，但同步 live 配置失败: {err}")
+    } else {
+        format!("OpenClaw config directory saved, but live sync failed: {err}")
+    }
+}
+
 pub fn tui_config_title() -> &'static str {
     if is_chinese() {
         "配置"

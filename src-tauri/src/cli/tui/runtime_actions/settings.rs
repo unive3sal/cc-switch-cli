@@ -46,6 +46,42 @@ pub(super) fn set_proxy_listen_port(
     })
 }
 
+pub(super) fn set_openclaw_config_dir(
+    ctx: &mut RuntimeActionContext<'_>,
+    path: Option<String>,
+) -> Result<(), AppError> {
+    let mut settings = crate::settings::get_settings();
+    settings.openclaw_config_dir = path;
+    crate::settings::update_settings(settings)?;
+
+    let state = load_state()?;
+    let sync_result = if crate::sync_policy::should_sync_live(&AppType::OpenClaw) {
+        crate::services::ProviderService::sync_openclaw_to_live(&state).err()
+    } else {
+        None
+    };
+
+    *ctx.data = UiData::load(&ctx.app.app_type)?;
+    ctx.app.push_toast(
+        texts::tui_toast_openclaw_config_dir_saved(),
+        super::super::app::ToastKind::Success,
+    );
+
+    if !crate::sync_policy::should_sync_live(&AppType::OpenClaw) {
+        ctx.app.push_toast(
+            texts::tui_toast_openclaw_config_dir_sync_skipped(),
+            super::super::app::ToastKind::Warning,
+        );
+    } else if let Some(err) = sync_result {
+        ctx.app.push_toast(
+            texts::tui_toast_openclaw_config_dir_sync_failed(&err.to_string()),
+            super::super::app::ToastKind::Warning,
+        );
+    }
+
+    Ok(())
+}
+
 pub(super) fn set_proxy_takeover(
     ctx: &mut RuntimeActionContext<'_>,
     app_type: AppType,
@@ -159,4 +195,180 @@ fn update_proxy_config(
         super::super::app::ToastKind::Success,
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use serde_json::json;
+    use std::ffi::OsString;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    use crate::app_config::AppType;
+    use crate::cli::tui::app::App;
+    use crate::cli::tui::data::UiData;
+    use crate::cli::tui::runtime_systems::RequestTracker;
+    use crate::cli::tui::terminal::TuiTerminal;
+    use crate::provider::Provider;
+    use crate::services::ProviderService;
+    use crate::test_support::{
+        lock_test_home_and_settings, set_test_home_override, TestHomeSettingsLock,
+    };
+
+    struct EnvGuard {
+        _lock: TestHomeSettingsLock,
+        old_home: Option<OsString>,
+        old_userprofile: Option<OsString>,
+    }
+
+    impl EnvGuard {
+        fn set_home(home: &Path) -> Self {
+            let lock = lock_test_home_and_settings();
+            let old_home = std::env::var_os("HOME");
+            let old_userprofile = std::env::var_os("USERPROFILE");
+            std::env::set_var("HOME", home);
+            std::env::set_var("USERPROFILE", home);
+            set_test_home_override(Some(home));
+            crate::settings::reload_test_settings();
+            Self {
+                _lock: lock,
+                old_home,
+                old_userprofile,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.old_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.old_userprofile {
+                Some(value) => std::env::set_var("USERPROFILE", value),
+                None => std::env::remove_var("USERPROFILE"),
+            }
+            set_test_home_override(self.old_home.as_deref().map(Path::new));
+            crate::settings::reload_test_settings();
+        }
+    }
+
+    #[test]
+    fn set_openclaw_config_dir_persists_override_and_syncs_live_config() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        let target_dir = temp_home.path().join("wsl-openclaw");
+        std::fs::create_dir_all(&target_dir).expect("create target openclaw dir");
+
+        let state = crate::store::AppState::try_new().expect("create state");
+        ProviderService::add(
+            &state,
+            AppType::OpenClaw,
+            Provider::with_id(
+                "demo".to_string(),
+                "Demo".to_string(),
+                json!({
+                    "apiKey": "sk-demo",
+                    "baseUrl": "https://demo.example/v1",
+                    "models": [{ "id": "demo-model" }]
+                }),
+                None,
+            ),
+        )
+        .expect("add openclaw provider");
+
+        let mut terminal = TuiTerminal::new_for_test().expect("create test terminal");
+        let mut app = App::new(Some(AppType::OpenClaw));
+        let mut data = UiData::load(&AppType::OpenClaw).expect("load ui data");
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        set_openclaw_config_dir(&mut ctx, Some(target_dir.display().to_string()))
+            .expect("save openclaw config dir");
+
+        assert_eq!(
+            crate::settings::get_settings().openclaw_config_dir,
+            Some(target_dir.display().to_string())
+        );
+        assert_eq!(
+            ctx.data.config.openclaw_config_path.as_ref(),
+            Some(&target_dir.join("openclaw.json"))
+        );
+
+        let live_path = target_dir.join("openclaw.json");
+        let source = std::fs::read_to_string(&live_path).expect("read synced openclaw config");
+        let value: serde_json::Value =
+            json5::from_str(&source).expect("parse synced openclaw config as json5");
+        assert_eq!(
+            value["models"]["providers"]["demo"]["baseUrl"],
+            json!("https://demo.example/v1")
+        );
+        assert_eq!(
+            value["models"]["providers"]["demo"]["models"][0]["id"],
+            json!("demo-model")
+        );
+    }
+
+    #[test]
+    fn set_openclaw_config_dir_none_clears_override_and_falls_back_to_default_path() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = EnvGuard::set_home(temp_home.path());
+
+        let override_dir = temp_home.path().join("custom-openclaw");
+        std::fs::create_dir_all(&override_dir).expect("create override dir");
+        let mut settings = crate::settings::get_settings();
+        settings.openclaw_config_dir = Some(override_dir.display().to_string());
+        crate::settings::update_settings(settings).expect("seed openclaw override");
+
+        let mut terminal = TuiTerminal::new_for_test().expect("create test terminal");
+        let mut app = App::new(Some(AppType::OpenClaw));
+        let mut data = UiData::load(&AppType::OpenClaw).expect("load ui data");
+        let mut proxy_loading = RequestTracker::default();
+        let mut webdav_loading = RequestTracker::default();
+        let mut update_check = RequestTracker::default();
+        let mut ctx = RuntimeActionContext {
+            terminal: &mut terminal,
+            app: &mut app,
+            data: &mut data,
+            speedtest_req_tx: None,
+            stream_check_req_tx: None,
+            skills_req_tx: None,
+            proxy_req_tx: None,
+            proxy_loading: &mut proxy_loading,
+            local_env_req_tx: None,
+            webdav_req_tx: None,
+            webdav_loading: &mut webdav_loading,
+            update_req_tx: None,
+            update_check: &mut update_check,
+            model_fetch_req_tx: None,
+        };
+
+        set_openclaw_config_dir(&mut ctx, None).expect("clear openclaw config dir");
+
+        assert_eq!(crate::settings::get_settings().openclaw_config_dir, None);
+        assert_eq!(
+            ctx.data.config.openclaw_config_path.as_ref(),
+            Some(&temp_home.path().join(".openclaw").join("openclaw.json"))
+        );
+    }
 }

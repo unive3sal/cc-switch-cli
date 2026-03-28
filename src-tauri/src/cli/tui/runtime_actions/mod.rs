@@ -290,6 +290,7 @@ pub(crate) fn handle_action(
             settings::set_proxy_listen_address(&mut ctx, address)
         }
         Action::SetProxyListenPort { port } => settings::set_proxy_listen_port(&mut ctx, port),
+        Action::SetOpenClawConfigDir { path } => settings::set_openclaw_config_dir(&mut ctx, path),
         Action::SetProxyTakeover { app_type, enabled } => {
             settings::set_proxy_takeover(&mut ctx, app_type, enabled)
         }

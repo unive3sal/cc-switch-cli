@@ -2498,6 +2498,26 @@ pub mod texts {
         }
     }
 
+    pub fn tui_settings_openclaw_config_dir_label() -> &'static str {
+        if is_chinese() {
+            "OpenClaw 配置目录"
+        } else {
+            "OpenClaw Config Directory"
+        }
+    }
+
+    pub fn tui_settings_openclaw_config_dir_prompt() -> &'static str {
+        if is_chinese() {
+            "输入 OpenClaw 配置目录；留空恢复默认 ~/.openclaw"
+        } else {
+            "Enter the OpenClaw config directory; leave empty to use ~/.openclaw"
+        }
+    }
+
+    pub fn tui_settings_openclaw_config_dir_default_value() -> &'static str {
+        "Default (~/.openclaw)"
+    }
+
     pub fn tui_settings_proxy_restart_hint() -> &'static str {
         if is_chinese() {
             "修改监听地址或端口后，需先停止并重新开启本地代理才能生效"
@@ -2551,6 +2571,30 @@ pub mod texts {
             "本地代理正在运行。请先停止代理，再修改监听地址或端口。"
         } else {
             "The local proxy is running. Stop it before editing listen address or port."
+        }
+    }
+
+    pub fn tui_toast_openclaw_config_dir_saved() -> &'static str {
+        if is_chinese() {
+            "OpenClaw 配置目录已保存。"
+        } else {
+            "OpenClaw config directory saved."
+        }
+    }
+
+    pub fn tui_toast_openclaw_config_dir_sync_skipped() -> &'static str {
+        if is_chinese() {
+            "目标 OpenClaw 目录尚未初始化；已保存设置，但暂未同步 live 配置。"
+        } else {
+            "The target OpenClaw directory is not initialized yet; the setting was saved but live sync was skipped."
+        }
+    }
+
+    pub fn tui_toast_openclaw_config_dir_sync_failed(err: &str) -> String {
+        if is_chinese() {
+            format!("OpenClaw 配置目录已保存，但同步 live 配置失败: {err}")
+        } else {
+            format!("OpenClaw config directory saved, but live sync failed: {err}")
         }
     }
 
