@@ -143,7 +143,7 @@ pub(super) fn strip_codex_common_config_from_full_text(
     Ok(doc.to_string())
 }
 
-pub(super) fn is_codex_official_provider(provider: &Provider) -> bool {
+pub(crate) fn is_codex_official_provider(provider: &Provider) -> bool {
     provider
         .meta
         .as_ref()

@@ -31,11 +31,9 @@ use crate::store::AppState;
 use gemini_auth::GeminiAuthType;
 use live::LiveSnapshot;
 
+pub(crate) use common::is_codex_official_provider;
 pub use common::migrate_legacy_codex_config;
-use common::{
-    is_codex_official_provider, merge_json_values, strip_codex_common_config_from_full_text,
-    strip_common_values,
-};
+use common::{merge_json_values, strip_codex_common_config_from_full_text, strip_common_values};
 
 /// 供应商相关业务逻辑
 pub struct ProviderService;

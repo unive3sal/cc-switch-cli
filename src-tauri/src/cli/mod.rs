@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use clap_complete::Shell;
 
 mod claude_temp_launch;
+mod codex_temp_launch;
 pub mod commands;
 pub mod editor;
 pub mod i18n;
@@ -187,6 +188,19 @@ mod tests {
                 assert_eq!(selector, "demo");
             }
             _ => panic!("expected start claude command"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parses_start_codex_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "start", "codex", "demo"]);
+
+        match cli.command {
+            Some(Commands::Start(super::commands::start::StartCommand::Codex { selector })) => {
+                assert_eq!(selector, "demo");
+            }
+            _ => panic!("expected start codex command"),
         }
     }
 
