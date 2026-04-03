@@ -2,7 +2,7 @@
 
 # CC-Switch CLI
 
-[![Version](https://img.shields.io/badge/version-5.2.1-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
+[![Version](https://img.shields.io/badge/version-5.3.0-blue.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/saladday/cc-switch-cli/releases)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -30,16 +30,16 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
 
 ---
 
-## 🆕 What's New in 5.2.1
+## 🆕 What's New in 5.3.0
 
 <div align="center">
-  <h3><strong>🦞 Expanded OpenClaw support, workspace tools, and install flow updates</strong></h3>
+  <h3><strong>🧭 Multi-window provider launch, deeper MCP env editing, and runtime polish</strong></h3>
 </div>
 
-- 🦞 Expanded OpenClaw support across switching, workspace management, daily memory, and dedicated config routes.
-- Added workspace commands and TUI flows for files, memory notes, and OpenClaw config work.
-- The installer now supports version selection and auto-prefixes bare versions with `v`.
-- Fixed stale provider meta cleanup and duplicate-field save failures in recent provider and TUI flows.
+- Run different Claude/Codex windows against different providers without disturbing your current global setup.
+- Add richer TUI support for MCP env editing with overlay-based editing, duplicate-key protection, and clearer field summaries.
+- Improve runtime and TUI alignment across temporary launch routing, provider safety flows, and platform-aware affordances.
+- Continue polishing OpenClaw flows, sponsor presets, config routes, and release docs for the current CLI release line.
 
 ---
 
