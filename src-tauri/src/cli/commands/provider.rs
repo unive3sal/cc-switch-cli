@@ -19,6 +19,17 @@ fn supports_official_provider(app_type: &AppType) -> bool {
     matches!(app_type, AppType::Codex)
 }
 
+fn is_codex_official_provider(provider: &Provider) -> bool {
+    provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.codex_official)
+        .unwrap_or(false)
+        || provider.category.as_deref() == Some("official")
+        || provider.website_url.as_deref() == Some("https://chatgpt.com/codex")
+        || provider.name.trim().eq_ignore_ascii_case("OpenAI Official")
+}
+
 #[derive(Subcommand)]
 pub enum ProviderCommand {
     /// List all providers
@@ -324,7 +335,11 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
         .prompt()
         .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
     {
-        prompt_settings_config(&app_type, Some(&original.settings_config))?
+        prompt_settings_config(
+            &app_type,
+            Some(&original.settings_config),
+            matches!(app_type, AppType::Codex) && is_codex_official_provider(&original),
+        )?
     } else {
         original.settings_config.clone()
     };

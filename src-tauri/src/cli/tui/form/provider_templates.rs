@@ -283,10 +283,12 @@ impl ProviderAddFormState {
                     });
                     self.name.set("OpenAI Official");
                     self.website_url.set("https://chatgpt.com/codex");
-                    self.codex_base_url.set("https://api.openai.com/v1");
-                    self.codex_model.set("gpt-5.2-codex");
+                    self.codex_api_key.set("");
+                    self.codex_base_url.set("");
+                    self.codex_model.set("");
                     self.codex_wire_api = CodexWireApi::Responses;
                     self.codex_requires_openai_auth = true;
+                    self.codex_env_key.set("");
                 }
                 ProviderTemplateId::GoogleOAuth => {
                     self.name.set("Google OAuth");

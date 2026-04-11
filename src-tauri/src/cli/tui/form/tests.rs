@@ -651,7 +651,7 @@ fn provider_add_form_codex_custom_includes_api_key_and_hides_advanced_fields() {
 }
 
 #[test]
-fn provider_add_form_codex_openai_official_sets_website_and_keeps_api_key_field() {
+fn provider_add_form_codex_openai_official_hides_provider_specific_fields() {
     let mut form = ProviderAddFormState::new(AppType::Codex);
     let existing_ids = Vec::<String>::new();
 
@@ -660,8 +660,16 @@ fn provider_add_form_codex_openai_official_sets_website_and_keeps_api_key_field(
     assert_eq!(form.website_url.value, "https://chatgpt.com/codex");
     let fields = form.fields();
     assert!(
-        fields.contains(&ProviderAddField::CodexApiKey),
-        "official Codex provider should still expose API Key input for the stored snapshot"
+        !fields.contains(&ProviderAddField::CodexBaseUrl),
+        "official Codex provider should not expose Base URL input"
+    );
+    assert!(
+        !fields.contains(&ProviderAddField::CodexModel),
+        "official Codex provider should not expose model override input"
+    );
+    assert!(
+        !fields.contains(&ProviderAddField::CodexApiKey),
+        "official Codex provider should preserve auth.json snapshots instead of rewriting them via API Key"
     );
 }
 
@@ -785,6 +793,56 @@ fn provider_add_form_codex_packycode_hides_env_key_field() {
         !fields.contains(&ProviderAddField::CodexEnvKey),
         "Codex env key should not be configurable for PackyCode"
     );
+}
+
+#[test]
+fn provider_add_form_codex_official_roundtrip_preserves_auth_and_strips_provider_config() {
+    let mut provider = Provider::with_id(
+        "codex-official".to_string(),
+        "OpenAI Official".to_string(),
+        json!({
+            "auth": {
+                "access_token": "oauth-token",
+                "refresh_token": "refresh-token"
+            },
+            "config": "model_provider = \"openai\"\nmodel = \"gpt-5.2-codex\"\nmodel_reasoning_effort = \"high\"\n\n[model_providers.openai]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+        }),
+        Some("https://chatgpt.com/codex".to_string()),
+    );
+    provider.category = Some("official".to_string());
+    provider.meta = Some(crate::provider::ProviderMeta {
+        codex_official: Some(true),
+        ..Default::default()
+    });
+
+    let form = ProviderAddFormState::from_provider(AppType::Codex, &provider);
+    let fields = form.fields();
+    assert!(
+        !fields.contains(&ProviderAddField::CodexBaseUrl),
+        "official Codex provider should stay out of the third-party endpoint flow"
+    );
+
+    let out = form.to_provider_json_value();
+    assert_eq!(
+        out["settingsConfig"]["auth"], provider.settings_config["auth"],
+        "official Codex provider should keep the stored auth snapshot"
+    );
+    assert_eq!(
+        out["settingsConfig"]["config"], "model_reasoning_effort = \"high\"",
+        "official Codex provider should drop provider-level base_url/model settings on save"
+    );
+}
+
+#[test]
+fn provider_add_form_codex_official_seed_roundtrip_keeps_empty_auth_and_config() {
+    let mut form = ProviderAddFormState::new(AppType::Codex);
+    let existing_ids = Vec::<String>::new();
+
+    form.apply_template(1, &existing_ids);
+
+    let out = form.to_provider_json_value();
+    assert_eq!(out["settingsConfig"]["auth"], json!({}));
+    assert_eq!(out["settingsConfig"]["config"], "");
 }
 
 #[test]

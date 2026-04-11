@@ -113,63 +113,82 @@ impl ProviderAddFormState {
                 settings_obj.remove("openrouter_compat_mode");
             }
             AppType::Codex => {
-                let provider_key =
-                    clean_codex_provider_key(self.id.value.trim(), self.name.value.trim());
-                let base_url = self.codex_base_url.value.trim().trim_end_matches('/');
-                let model = if self.codex_model.is_blank() {
-                    "gpt-5.2-codex"
-                } else {
-                    self.codex_model.value.trim()
-                };
+                if self.is_codex_official_provider() {
+                    let existing_config = settings_obj
+                        .get("config")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    let cleaned_config =
+                        crate::codex_config::strip_codex_provider_config_text(existing_config)
+                            .map_err(|_| ())
+                            .unwrap_or_else(|_| existing_config.trim().to_string());
+                    settings_obj.insert("config".to_string(), Value::String(cleaned_config));
 
-                let existing_config = settings_obj
-                    .get("config")
-                    .and_then(|value| value.as_str())
-                    .unwrap_or("");
-                let base_config = if existing_config.trim().is_empty() {
-                    build_codex_provider_config_toml(
-                        &provider_key,
-                        base_url,
-                        model,
-                        self.codex_wire_api,
-                    )
-                } else {
-                    existing_config.to_string()
-                };
-                let config_toml = update_codex_config_snippet(
-                    &base_config,
-                    base_url,
-                    model,
-                    self.codex_wire_api,
-                    self.codex_requires_openai_auth,
-                    self.codex_env_key.value.trim(),
-                );
-                settings_obj.insert("config".to_string(), Value::String(config_toml));
-
-                let api_key = self.codex_api_key.value.trim();
-                if api_key.is_empty() {
-                    if let Some(auth_obj) = settings_obj
-                        .get_mut("auth")
-                        .and_then(|value| value.as_object_mut())
-                    {
-                        auth_obj.remove("OPENAI_API_KEY");
-                        if auth_obj.is_empty() {
-                            settings_obj.remove("auth");
-                        }
-                    } else {
-                        settings_obj.remove("auth");
-                    }
-                } else {
                     let auth_value = settings_obj
                         .entry("auth".to_string())
                         .or_insert_with(|| json!({}));
                     if !auth_value.is_object() {
                         *auth_value = json!({});
                     }
-                    let auth_obj = auth_value
-                        .as_object_mut()
-                        .expect("auth must be a JSON object");
-                    auth_obj.insert("OPENAI_API_KEY".to_string(), json!(api_key));
+                } else {
+                    let provider_key =
+                        clean_codex_provider_key(self.id.value.trim(), self.name.value.trim());
+                    let base_url = self.codex_base_url.value.trim().trim_end_matches('/');
+                    let model = if self.codex_model.is_blank() {
+                        "gpt-5.2-codex"
+                    } else {
+                        self.codex_model.value.trim()
+                    };
+
+                    let existing_config = settings_obj
+                        .get("config")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    let base_config = if existing_config.trim().is_empty() {
+                        build_codex_provider_config_toml(
+                            &provider_key,
+                            base_url,
+                            model,
+                            self.codex_wire_api,
+                        )
+                    } else {
+                        existing_config.to_string()
+                    };
+                    let config_toml = update_codex_config_snippet(
+                        &base_config,
+                        base_url,
+                        model,
+                        self.codex_wire_api,
+                        self.codex_requires_openai_auth,
+                        self.codex_env_key.value.trim(),
+                    );
+                    settings_obj.insert("config".to_string(), Value::String(config_toml));
+
+                    let api_key = self.codex_api_key.value.trim();
+                    if api_key.is_empty() {
+                        if let Some(auth_obj) = settings_obj
+                            .get_mut("auth")
+                            .and_then(|value| value.as_object_mut())
+                        {
+                            auth_obj.remove("OPENAI_API_KEY");
+                            if auth_obj.is_empty() {
+                                settings_obj.remove("auth");
+                            }
+                        } else {
+                            settings_obj.remove("auth");
+                        }
+                    } else {
+                        let auth_value = settings_obj
+                            .entry("auth".to_string())
+                            .or_insert_with(|| json!({}));
+                        if !auth_value.is_object() {
+                            *auth_value = json!({});
+                        }
+                        let auth_obj = auth_value
+                            .as_object_mut()
+                            .expect("auth must be a JSON object");
+                        auth_obj.insert("OPENAI_API_KEY".to_string(), json!(api_key));
+                    }
                 }
             }
             AppType::Gemini => {

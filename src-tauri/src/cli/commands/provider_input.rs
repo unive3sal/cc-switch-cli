@@ -3,6 +3,7 @@
 
 use crate::app_config::AppType;
 use crate::cli::i18n::texts;
+use crate::cli::ui::info;
 use crate::error::AppError;
 use crate::provider::Provider;
 use colored::Colorize;
@@ -23,24 +24,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn codex_official_settings_config_includes_auth_and_enables_openai_auth() {
-        let cfg = build_codex_official_settings_config("sk-test", "gpt-4o", "chat");
+    fn codex_official_settings_config_uses_upstream_seed_shape() {
+        let cfg = build_codex_official_settings_config(None).expect("build official settings");
         assert!(
             cfg.get("auth").is_some(),
             "official Codex provider should carry auth like upstream snapshots"
         );
+        assert_eq!(cfg.get("auth"), Some(&json!({})));
+        assert_eq!(cfg.get("config"), Some(&json!("")));
+    }
 
-        let toml_text = cfg
-            .get("config")
-            .and_then(Value::as_str)
-            .expect("settings_config.config should be string");
-        assert!(
-            toml_text.contains("requires_openai_auth = true"),
-            "official Codex provider should enable requires_openai_auth"
+    #[test]
+    fn codex_official_settings_config_preserves_auth_and_strips_provider_config() {
+        let cfg = build_codex_official_settings_config(Some(&json!({
+            "auth": {
+                "access_token": "oauth-token",
+                "refresh_token": "refresh-token"
+            },
+            "config": "model_provider = \"openai\"\nmodel = \"gpt-5.2-codex\"\nmodel_reasoning_effort = \"high\"\n\n[model_providers.openai]\nbase_url = \"https://api.openai.com/v1\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n"
+        })))
+        .expect("build official settings");
+
+        assert_eq!(
+            cfg.get("auth"),
+            Some(&json!({
+                "access_token": "oauth-token",
+                "refresh_token": "refresh-token"
+            }))
         );
-        assert!(
-            toml_text.contains("wire_api = \"responses\""),
-            "official Codex provider should use responses wire API"
+        assert_eq!(
+            cfg.get("config").and_then(Value::as_str),
+            Some("model_reasoning_effort = \"high\"")
         );
     }
 }
@@ -110,14 +124,22 @@ fn build_codex_settings_config(
     }
 }
 
-fn build_codex_official_settings_config(api_key: &str, model: &str, _wire_api: &str) -> Value {
-    build_codex_settings_config(
-        Some(api_key),
-        CODEX_OFFICIAL_BASE_URL,
-        model,
-        "responses",
-        "openai",
-    )
+fn build_codex_official_settings_config(current: Option<&Value>) -> Result<Value, AppError> {
+    let auth = current
+        .and_then(|value| value.get("auth"))
+        .and_then(Value::as_object)
+        .map(|value| Value::Object(value.clone()))
+        .unwrap_or_else(|| json!({}));
+    let config = current
+        .and_then(|value| value.get("config"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let cleaned_config = crate::codex_config::strip_codex_provider_config_text(config)?;
+
+    Ok(json!({
+        "auth": auth,
+        "config": cleaned_config
+    }))
 }
 
 /// 可选字段集合
@@ -234,10 +256,15 @@ pub fn prompt_basic_fields(
 pub fn prompt_settings_config(
     app_type: &AppType,
     current: Option<&Value>,
+    codex_official: bool,
 ) -> Result<Value, AppError> {
     match app_type {
         AppType::Claude => prompt_claude_config(current),
         AppType::Codex => {
+            if codex_official {
+                return prompt_codex_official_config(current);
+            }
+
             let has_auth = current
                 .and_then(|v| v.get("auth"))
                 .and_then(|v| v.as_object())
@@ -551,94 +578,11 @@ fn prompt_codex_config(current: Option<&Value>) -> Result<Value, AppError> {
 /// Codex 配置输入（官方：仍写入 provider snapshot 的 auth/config）
 fn prompt_codex_official_config(current: Option<&Value>) -> Result<Value, AppError> {
     println!("\n{}", texts::config_codex_header().bright_cyan().bold());
-
-    let current_api_key = current
-        .and_then(|v| v.get("auth"))
-        .and_then(|a| a.get("OPENAI_API_KEY"))
-        .and_then(|k| k.as_str())
-        .filter(|s| !s.is_empty());
-
-    let current_config_str = current
-        .and_then(|v| v.get("config"))
-        .and_then(|c| c.as_str());
-
-    let mut current_base_url: Option<String> = None;
-    let mut current_model: Option<String> = None;
-    if let Some(cfg) = current_config_str {
-        if let Ok(table) = toml::from_str::<toml::Table>(cfg) {
-            current_base_url = table
-                .get("base_url")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-            if current_base_url.is_none() {
-                if let (Some(model_provider), Some(model_providers)) = (
-                    table.get("model_provider").and_then(|v| v.as_str()),
-                    table.get("model_providers").and_then(|v| v.as_table()),
-                ) {
-                    current_base_url = model_providers
-                        .get(model_provider)
-                        .and_then(|v| v.as_table())
-                        .and_then(|t| t.get("base_url"))
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
-                }
-            }
-            current_model = table
-                .get("model")
-                .and_then(|v| v.as_str())
-                .map(String::from);
-        }
-    }
-
-    let api_key = if let Some(current_key) = current_api_key {
-        Text::new(texts::openai_api_key_label())
-            .with_initial_value(current_key)
-            .with_help_message(texts::api_key_help())
-            .prompt()
-            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
-    } else {
-        Text::new(texts::openai_api_key_label())
-            .with_placeholder("sk-...")
-            .with_help_message(texts::api_key_help())
-            .prompt()
-            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
-    };
-
-    let base_url = if let Some(current) = current_base_url.as_deref() {
-        Text::new(&format!("{}:", texts::tui_label_base_url()))
-            .with_initial_value(current)
-            .with_help_message("API endpoint (e.g., https://api.openai.com/v1)")
-            .prompt()
-            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
-    } else {
-        Text::new(&format!("{}:", texts::tui_label_base_url()))
-            .with_placeholder(CODEX_OFFICIAL_BASE_URL)
-            .with_help_message("API endpoint")
-            .prompt()
-            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
-    };
-
-    let model = if let Some(current) = current_model.as_deref() {
-        Text::new(&format!("{}:", texts::model_label()))
-            .with_initial_value(current)
-            .with_help_message("Model name (e.g., gpt-5.2-codex, o3)")
-            .prompt()
-            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
-    } else {
-        Text::new(&format!("{}:", texts::model_label()))
-            .with_placeholder("gpt-5.2-codex")
-            .with_help_message("Model name")
-            .prompt()
-            .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?
-    };
-
-    Ok(build_codex_settings_config(
-        Some(api_key.trim()),
-        base_url.trim(),
-        model.trim(),
-        "responses",
-        "openai",
-    ))
+    println!(
+        "{}",
+        info("OpenAI Official keeps the stored auth snapshot and uses the upstream empty official config.")
+    );
+    build_codex_official_settings_config(current)
 }
 
 /// Gemini 配置输入（含认证类型选择）

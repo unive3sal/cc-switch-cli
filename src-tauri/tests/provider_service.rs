@@ -3426,6 +3426,81 @@ fn provider_service_switch_codex_preserves_missing_requires_openai_auth_for_open
 }
 
 #[test]
+fn provider_service_switch_codex_openai_official_preserves_oauth_auth_and_common_only_config() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let home = ensure_test_home();
+
+    std::fs::create_dir_all(home.join(".codex")).expect("create codex dir (initialized)");
+
+    let auth_path = cc_switch_lib::get_codex_auth_path();
+    std::fs::write(&auth_path, r#"{"OPENAI_API_KEY":"stale-key"}"#).expect("seed auth.json");
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Codex)
+            .expect("codex manager");
+        manager.current = "p2".to_string();
+
+        let mut official = Provider::with_id(
+            "p1".to_string(),
+            "OpenAI Official".to_string(),
+            json!({
+                "auth": {
+                    "access_token": "oauth-token",
+                    "refresh_token": "refresh-token"
+                },
+                "config": "model_reasoning_effort = \"high\"\ndisable_response_storage = true"
+            }),
+            Some("https://chatgpt.com/codex".to_string()),
+        );
+        official.meta = Some(ProviderMeta {
+            codex_official: Some(true),
+            ..Default::default()
+        });
+        manager.providers.insert("p1".to_string(), official);
+
+        manager.providers.insert(
+            "p2".to_string(),
+            Provider::with_id(
+                "p2".to_string(),
+                "Other".to_string(),
+                json!({
+                    "auth": { "OPENAI_API_KEY": "sk-other" },
+                    "config": "model_provider = \"p2\"\nmodel = \"gpt-5.2-codex\"\n\n[model_providers.p2]\nbase_url = \"https://api.other.example/v1\"\nwire_api = \"chat\"\nrequires_openai_auth = false\nenv_key = \"OPENAI_API_KEY\"\n"
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+
+    ProviderService::switch(&state, AppType::Codex, "p1")
+        .expect("switch to stripped OpenAI official provider should succeed");
+
+    let auth_value: serde_json::Value =
+        read_json_file(&auth_path).expect("read auth.json after switch");
+    assert_eq!(
+        auth_value["access_token"],
+        json!("oauth-token"),
+        "official provider should restore the stored OAuth auth snapshot"
+    );
+
+    let live_text =
+        std::fs::read_to_string(cc_switch_lib::get_codex_config_path()).expect("read config.toml");
+    assert!(
+        !live_text.contains("base_url = "),
+        "official provider should not reintroduce a provider-specific base_url into live config"
+    );
+    assert!(
+        live_text.contains("model_reasoning_effort = \"high\""),
+        "official provider should still keep shared Codex settings"
+    );
+}
+
+#[test]
 fn provider_service_delete_codex_removes_provider_and_files() {
     let _guard = lock_test_mutex();
     reset_test_fs();

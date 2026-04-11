@@ -126,6 +126,44 @@ pub fn validate_config_toml(text: &str) -> Result<(), AppError> {
         .map_err(|e| AppError::toml(Path::new("config.toml"), e))
 }
 
+/// Remove provider-specific Codex TOML keys and keep only shared/global settings.
+///
+/// This matches upstream "OpenAI Official" snapshot semantics where the official
+/// provider does not persist a provider-local `base_url` / `model_provider`
+/// section, but may still carry root-level shared settings.
+pub fn strip_codex_provider_config_text(config_toml: &str) -> Result<String, AppError> {
+    let config_toml = config_toml.trim();
+    if config_toml.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut doc = config_toml
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| AppError::Config(format!("TOML parse error: {e}")))?;
+    let root = doc.as_table_mut();
+    root.remove("model");
+    root.remove("model_provider");
+    root.remove("base_url");
+    root.remove("model_providers");
+
+    let mut cleaned = String::new();
+    let mut blank_run = 0usize;
+    for line in doc.to_string().lines() {
+        if line.trim().is_empty() {
+            blank_run += 1;
+            if blank_run <= 1 {
+                cleaned.push('\n');
+            }
+            continue;
+        }
+        blank_run = 0;
+        cleaned.push_str(line);
+        cleaned.push('\n');
+    }
+
+    Ok(cleaned.trim().to_string())
+}
+
 /// 读取并校验 `~/.codex/config.toml`，返回文本（可能为空）
 pub fn read_and_validate_codex_config_text() -> Result<String, AppError> {
     let s = read_codex_config_text()?;
