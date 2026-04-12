@@ -295,8 +295,25 @@ fn schema_migration_v4_adds_pricing_model_columns() {
     let conn = Connection::open_in_memory().expect("open memory db");
     conn.execute_batch(
         r#"
+        CREATE TABLE providers (
+            id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            settings_config TEXT NOT NULL DEFAULT '{}',
+            meta TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (id, app_type)
+        );
         CREATE TABLE proxy_config (app_type TEXT PRIMARY KEY);
         CREATE TABLE proxy_request_logs (request_id TEXT PRIMARY KEY, model TEXT NOT NULL);
+        CREATE TABLE mcp_servers (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            server_config TEXT NOT NULL,
+            enabled_claude INTEGER NOT NULL DEFAULT 0,
+            enabled_codex INTEGER NOT NULL DEFAULT 0,
+            enabled_gemini INTEGER NOT NULL DEFAULT 0,
+            enabled_opencode INTEGER NOT NULL DEFAULT 0
+        );
         "#,
     )
     .expect("seed v4 schema");
@@ -343,6 +360,28 @@ fn schema_create_tables_include_usage_daily_rollups() {
     assert_eq!(
         normalize_default(&avg_latency.default).as_deref(),
         Some("0")
+    );
+
+    assert!(
+        Database::table_exists(&conn, "session_log_sync").expect("check session_log_sync table"),
+        "session_log_sync should exist after create_tables"
+    );
+
+    let content_hash = get_column_info(&conn, "skills", "content_hash");
+    assert_eq!(content_hash.r#type, "TEXT");
+    assert_eq!(content_hash.notnull, 0);
+
+    let updated_at = get_column_info(&conn, "skills", "updated_at");
+    assert_eq!(updated_at.r#type, "INTEGER");
+    assert_eq!(updated_at.notnull, 1);
+    assert_eq!(normalize_default(&updated_at.default).as_deref(), Some("0"));
+
+    let data_source = get_column_info(&conn, "proxy_request_logs", "data_source");
+    assert_eq!(data_source.r#type, "TEXT");
+    assert_eq!(data_source.notnull, 1);
+    assert_eq!(
+        normalize_default(&data_source.default).as_deref(),
+        Some("proxy")
     );
 }
 
@@ -444,6 +483,240 @@ fn schema_migration_v5_adds_usage_daily_rollups() {
     assert_eq!(
         Database::get_user_version(&conn).expect("version after migration"),
         SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn schema_migration_v6_adds_skill_update_columns() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE skills (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            directory TEXT NOT NULL,
+            enabled_claude BOOLEAN NOT NULL DEFAULT 0,
+            enabled_codex BOOLEAN NOT NULL DEFAULT 0,
+            enabled_gemini BOOLEAN NOT NULL DEFAULT 0,
+            enabled_opencode BOOLEAN NOT NULL DEFAULT 0,
+            installed_at INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE providers (
+            id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            settings_config TEXT NOT NULL,
+            meta TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (id, app_type)
+        );
+        CREATE TABLE mcp_servers (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            server_config TEXT NOT NULL,
+            enabled_claude INTEGER NOT NULL DEFAULT 0,
+            enabled_codex INTEGER NOT NULL DEFAULT 0,
+            enabled_gemini INTEGER NOT NULL DEFAULT 0,
+            enabled_opencode INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE prompts (
+            id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            content TEXT NOT NULL,
+            PRIMARY KEY (id, app_type)
+        );
+        CREATE TABLE skill_repos (
+            owner TEXT NOT NULL,
+            name TEXT NOT NULL,
+            branch TEXT NOT NULL DEFAULT 'main',
+            enabled BOOLEAN NOT NULL DEFAULT 1,
+            PRIMARY KEY (owner, name)
+        );
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE proxy_config (app_type TEXT PRIMARY KEY);
+        CREATE TABLE proxy_request_logs (request_id TEXT PRIMARY KEY, model TEXT NOT NULL);
+        CREATE TABLE stream_check_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider_id TEXT NOT NULL,
+            provider_name TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            success INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            tested_at INTEGER NOT NULL
+        );
+        CREATE TABLE model_pricing (
+            model_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            input_cost_per_million TEXT NOT NULL,
+            output_cost_per_million TEXT NOT NULL,
+            cache_read_cost_per_million TEXT NOT NULL DEFAULT '0',
+            cache_creation_cost_per_million TEXT NOT NULL DEFAULT '0'
+        );
+        CREATE TABLE proxy_live_backup (
+            app_type TEXT PRIMARY KEY,
+            original_config TEXT NOT NULL,
+            backed_up_at TEXT NOT NULL
+        );
+        CREATE TABLE usage_daily_rollups (
+            date TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            model TEXT NOT NULL,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            success_count INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            total_cost_usd TEXT NOT NULL DEFAULT '0',
+            avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (date, app_type, provider_id, model)
+        );
+        "#,
+    )
+    .expect("seed v6 schema");
+
+    Database::set_user_version(&conn, 6).expect("set user_version=6");
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    assert!(
+        Database::has_column(&conn, "skills", "content_hash").expect("check content_hash"),
+        "skills.content_hash should exist after v6 -> current migration"
+    );
+    assert!(
+        Database::has_column(&conn, "skills", "updated_at").expect("check updated_at"),
+        "skills.updated_at should exist after v6 -> current migration"
+    );
+}
+
+#[test]
+fn schema_migration_v7_adds_session_log_tracking_and_corrects_pricing() {
+    let conn = Connection::open_in_memory().expect("open memory db");
+    conn.execute_batch(
+        r#"
+        CREATE TABLE providers (
+            id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            settings_config TEXT NOT NULL,
+            meta TEXT NOT NULL DEFAULT '{}',
+            PRIMARY KEY (id, app_type)
+        );
+        CREATE TABLE skills (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            directory TEXT NOT NULL,
+            enabled_claude BOOLEAN NOT NULL DEFAULT 0,
+            enabled_codex BOOLEAN NOT NULL DEFAULT 0,
+            enabled_gemini BOOLEAN NOT NULL DEFAULT 0,
+            enabled_opencode BOOLEAN NOT NULL DEFAULT 0,
+            installed_at INTEGER NOT NULL DEFAULT 0,
+            content_hash TEXT,
+            updated_at INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE mcp_servers (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            server_config TEXT NOT NULL,
+            enabled_claude INTEGER NOT NULL DEFAULT 0,
+            enabled_codex INTEGER NOT NULL DEFAULT 0,
+            enabled_gemini INTEGER NOT NULL DEFAULT 0,
+            enabled_opencode INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE prompts (
+            id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            name TEXT NOT NULL,
+            content TEXT NOT NULL,
+            PRIMARY KEY (id, app_type)
+        );
+        CREATE TABLE skill_repos (
+            owner TEXT NOT NULL,
+            name TEXT NOT NULL,
+            branch TEXT NOT NULL DEFAULT 'main',
+            enabled BOOLEAN NOT NULL DEFAULT 1,
+            PRIMARY KEY (owner, name)
+        );
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+        CREATE TABLE proxy_config (app_type TEXT PRIMARY KEY);
+        CREATE TABLE proxy_request_logs (
+            request_id TEXT PRIMARY KEY,
+            provider_id TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            model TEXT NOT NULL
+        );
+        CREATE TABLE stream_check_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider_id TEXT NOT NULL,
+            provider_name TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            success INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            tested_at INTEGER NOT NULL
+        );
+        CREATE TABLE model_pricing (
+            model_id TEXT PRIMARY KEY,
+            display_name TEXT NOT NULL,
+            input_cost_per_million TEXT NOT NULL,
+            output_cost_per_million TEXT NOT NULL,
+            cache_read_cost_per_million TEXT NOT NULL DEFAULT '0',
+            cache_creation_cost_per_million TEXT NOT NULL DEFAULT '0'
+        );
+        INSERT INTO model_pricing (
+            model_id, display_name, input_cost_per_million, output_cost_per_million,
+            cache_read_cost_per_million, cache_creation_cost_per_million
+        ) VALUES ('deepseek-v3', 'DeepSeek V3', '2.00', '8.00', '0.40', '0');
+        CREATE TABLE proxy_live_backup (
+            app_type TEXT PRIMARY KEY,
+            original_config TEXT NOT NULL,
+            backed_up_at TEXT NOT NULL
+        );
+        CREATE TABLE usage_daily_rollups (
+            date TEXT NOT NULL,
+            app_type TEXT NOT NULL,
+            provider_id TEXT NOT NULL,
+            model TEXT NOT NULL,
+            request_count INTEGER NOT NULL DEFAULT 0,
+            success_count INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0,
+            output_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+            cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+            total_cost_usd TEXT NOT NULL DEFAULT '0',
+            avg_latency_ms INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (date, app_type, provider_id, model)
+        );
+        "#,
+    )
+    .expect("seed v7 schema");
+
+    Database::set_user_version(&conn, 7).expect("set user_version=7");
+    Database::apply_schema_migrations_on_conn(&conn).expect("apply migrations");
+
+    assert!(
+        Database::has_column(&conn, "proxy_request_logs", "data_source")
+            .expect("check data_source"),
+        "proxy_request_logs.data_source should exist after v7 -> current migration"
+    );
+    assert!(
+        Database::table_exists(&conn, "session_log_sync").expect("check session_log_sync"),
+        "session_log_sync should exist after v7 -> current migration"
+    );
+
+    let pricing: (String, String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, output_cost_per_million, cache_read_cost_per_million
+             FROM model_pricing WHERE model_id = 'deepseek-v3'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read deepseek-v3 pricing");
+    assert_eq!(
+        pricing,
+        ("0.28".to_string(), "1.11".to_string(), "0.028".to_string()),
+        "v7 -> v8 migration should normalize DeepSeek pricing values"
     );
 }
 
@@ -742,5 +1015,19 @@ fn schema_model_pricing_is_seeded_on_init() {
         gemini_count > 0,
         "应该包含 Gemini 模型定价，实际数量: {}",
         gemini_count
+    );
+
+    let deepseek_v3: (String, String, String) = conn
+        .query_row(
+            "SELECT input_cost_per_million, output_cost_per_million, cache_read_cost_per_million
+             FROM model_pricing WHERE model_id = 'deepseek-v3'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("check deepseek-v3 pricing");
+    assert_eq!(
+        deepseek_v3,
+        ("0.28".to_string(), "1.11".to_string(), "0.028".to_string()),
+        "新建数据库也应使用修正后的 DeepSeek 定价"
     );
 }

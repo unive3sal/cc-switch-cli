@@ -4,7 +4,7 @@
 
 use super::{lock_conn, Database, SCHEMA_VERSION};
 use crate::error::AppError;
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 
 impl Database {
     /// 创建所有数据库表
@@ -86,7 +86,9 @@ impl Database {
             enabled_codex BOOLEAN NOT NULL DEFAULT 0,
             enabled_gemini BOOLEAN NOT NULL DEFAULT 0,
             enabled_opencode BOOLEAN NOT NULL DEFAULT 0,
-            installed_at INTEGER NOT NULL DEFAULT 0
+            installed_at INTEGER NOT NULL DEFAULT 0,
+            content_hash TEXT,
+            updated_at INTEGER NOT NULL DEFAULT 0
         )",
             [],
         )
@@ -180,7 +182,8 @@ impl Database {
             total_cost_usd TEXT NOT NULL DEFAULT '0', latency_ms INTEGER NOT NULL, first_token_ms INTEGER,
             duration_ms INTEGER, status_code INTEGER NOT NULL, error_message TEXT, session_id TEXT,
             provider_type TEXT, is_streaming INTEGER NOT NULL DEFAULT 0,
-            cost_multiplier TEXT NOT NULL DEFAULT '1.0', created_at INTEGER NOT NULL
+            cost_multiplier TEXT NOT NULL DEFAULT '1.0', created_at INTEGER NOT NULL,
+            data_source TEXT NOT NULL DEFAULT 'proxy'
         )", []).map_err(|e| AppError::Database(e.to_string()))?;
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_request_logs_provider ON proxy_request_logs(provider_id, app_type)", [])
@@ -256,6 +259,17 @@ impl Database {
                 total_cost_usd TEXT NOT NULL DEFAULT '0',
                 avg_latency_ms INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (date, app_type, provider_id, model)
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS session_log_sync (
+                file_path TEXT PRIMARY KEY,
+                last_modified INTEGER NOT NULL,
+                last_line_offset INTEGER NOT NULL DEFAULT 0,
+                last_synced_at INTEGER NOT NULL
             )",
             [],
         )
@@ -381,9 +395,19 @@ impl Database {
                         Self::set_user_version(conn, 5)?;
                     }
                     5 => {
-                        log::info!("迁移数据库从 v5 到 v6（使用量聚合表）");
+                        log::info!("迁移数据库从 v5 到 v6（使用量聚合表 + Copilot 模板类型统一）");
                         Self::migrate_v5_to_v6(conn)?;
                         Self::set_user_version(conn, 6)?;
+                    }
+                    6 => {
+                        log::info!("迁移数据库从 v6 到 v7（Skills 更新检测支持）");
+                        Self::migrate_v6_to_v7(conn)?;
+                        Self::set_user_version(conn, 7)?;
+                    }
+                    7 => {
+                        log::info!("迁移数据库从 v7 到 v8（会话日志使用追踪 + 修正模型定价）");
+                        Self::migrate_v7_to_v8(conn)?;
+                        Self::set_user_version(conn, 8)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -960,7 +984,125 @@ impl Database {
         )
         .map_err(|e| AppError::Database(format!("创建 usage_daily_rollups 表失败: {e}")))?;
 
-        log::info!("v5 -> v6 迁移完成：已添加使用量日聚合表");
+        let mut stmt = conn
+            .prepare("SELECT id, app_type, meta FROM providers")
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let mut updates = Vec::new();
+        for row in rows {
+            let (id, app_type, meta_str) = row.map_err(|e| AppError::Database(e.to_string()))?;
+
+            if let Ok(mut meta) = serde_json::from_str::<serde_json::Value>(&meta_str) {
+                let mut updated = false;
+
+                if let Some(usage_script) = meta.get_mut("usage_script") {
+                    if let Some(template_type) = usage_script.get_mut("template_type") {
+                        if template_type == "copilot" {
+                            *template_type =
+                                serde_json::Value::String("github_copilot".to_string());
+                            updated = true;
+                        }
+                    }
+                }
+
+                if updated {
+                    let new_meta_str = serde_json::to_string(&meta)
+                        .map_err(|e| AppError::Database(e.to_string()))?;
+                    updates.push((id, app_type, new_meta_str));
+                }
+            }
+        }
+
+        for (id, app_type, new_meta) in updates {
+            conn.execute(
+                "UPDATE providers SET meta = ?1 WHERE id = ?2 AND app_type = ?3",
+                params![new_meta, id, app_type],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+
+        log::info!("v5 -> v6 迁移完成：已添加使用量日聚合表，统一 copilot 模板类型");
+        Ok(())
+    }
+
+    fn migrate_v6_to_v7(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "skills")? {
+            Self::add_column_if_missing(conn, "skills", "content_hash", "TEXT")?;
+            Self::add_column_if_missing(
+                conn,
+                "skills",
+                "updated_at",
+                "INTEGER NOT NULL DEFAULT 0",
+            )?;
+        }
+
+        log::info!("v6 -> v7 迁移完成：已添加 content_hash 和 updated_at 列");
+        Ok(())
+    }
+
+    fn migrate_v7_to_v8(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "proxy_request_logs")? {
+            Self::add_column_if_missing(
+                conn,
+                "proxy_request_logs",
+                "data_source",
+                "TEXT NOT NULL DEFAULT 'proxy'",
+            )?;
+        }
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS session_log_sync (
+                file_path TEXT PRIMARY KEY,
+                last_modified INTEGER NOT NULL,
+                last_line_offset INTEGER NOT NULL DEFAULT 0,
+                last_synced_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .map_err(|e| AppError::Database(format!("创建 session_log_sync 表失败: {e}")))?;
+
+        if Self::table_exists(conn, "model_pricing")? {
+            let pricing_fixes: &[(&str, &str, &str, &str, &str)] = &[
+                ("deepseek-v3.2", "0.28", "0.42", "0.028", "0"),
+                ("deepseek-v3.1", "0.55", "1.67", "0.055", "0"),
+                ("deepseek-v3", "0.28", "1.11", "0.028", "0"),
+                ("doubao-seed-code", "0.17", "1.11", "0.02", "0"),
+                ("kimi-k2-thinking", "0.55", "2.20", "0.10", "0"),
+                ("kimi-k2-0905", "0.55", "2.20", "0.10", "0"),
+                ("kimi-k2-turbo", "1.11", "8.06", "0.14", "0"),
+                ("minimax-m2.1", "0.27", "0.95", "0.03", "0"),
+                ("minimax-m2.1-lightning", "0.27", "2.33", "0.03", "0"),
+                ("minimax-m2", "0.27", "0.95", "0.03", "0"),
+                ("glm-4.7", "0.39", "1.75", "0.04", "0"),
+                ("glm-4.6", "0.28", "1.11", "0.03", "0"),
+                ("mimo-v2-flash", "0.09", "0.29", "0.009", "0"),
+            ];
+
+            for (model_id, input, output, cache_read, cache_creation) in pricing_fixes {
+                conn.execute(
+                    "UPDATE model_pricing SET
+                        input_cost_per_million = ?2,
+                        output_cost_per_million = ?3,
+                        cache_read_cost_per_million = ?4,
+                        cache_creation_cost_per_million = ?5
+                     WHERE model_id = ?1",
+                    params![model_id, input, output, cache_read, cache_creation],
+                )
+                .map_err(|e| AppError::Database(format!("更新模型 {model_id} 定价失败: {e}")))?;
+            }
+        }
+
+        log::info!("v7 -> v8 迁移完成：data_source 列、session_log_sync 表、修正 13 个模型定价");
         Ok(())
     }
 
@@ -1201,63 +1343,63 @@ impl Database {
             (
                 "doubao-seed-code",
                 "Doubao Seed Code",
-                "1.20",
-                "8.00",
-                "0.24",
+                "0.17",
+                "1.11",
+                "0.02",
                 "0",
             ),
             // DeepSeek 系列
             (
                 "deepseek-v3.2",
                 "DeepSeek V3.2",
-                "2.00",
-                "3.00",
-                "0.40",
+                "0.28",
+                "0.42",
+                "0.028",
                 "0",
             ),
             (
                 "deepseek-v3.1",
                 "DeepSeek V3.1",
-                "4.00",
-                "12.00",
-                "0.80",
+                "0.55",
+                "1.67",
+                "0.055",
                 "0",
             ),
-            ("deepseek-v3", "DeepSeek V3", "2.00", "8.00", "0.40", "0"),
+            ("deepseek-v3", "DeepSeek V3", "0.28", "1.11", "0.028", "0"),
             // Kimi (月之暗面)
             (
                 "kimi-k2-thinking",
                 "Kimi K2 Thinking",
-                "4.00",
-                "16.00",
-                "1.00",
+                "0.55",
+                "2.20",
+                "0.10",
                 "0",
             ),
-            ("kimi-k2-0905", "Kimi K2", "4.00", "16.00", "1.00", "0"),
+            ("kimi-k2-0905", "Kimi K2", "0.55", "2.20", "0.10", "0"),
             (
                 "kimi-k2-turbo",
                 "Kimi K2 Turbo",
-                "8.00",
-                "58.00",
-                "1.00",
+                "1.11",
+                "8.06",
+                "0.14",
                 "0",
             ),
             // MiniMax 系列
-            ("minimax-m2.1", "MiniMax M2.1", "2.10", "8.40", "0.21", "0"),
+            ("minimax-m2.1", "MiniMax M2.1", "0.27", "0.95", "0.03", "0"),
             (
                 "minimax-m2.1-lightning",
                 "MiniMax M2.1 Lightning",
-                "2.10",
-                "16.80",
-                "0.21",
+                "0.27",
+                "2.33",
+                "0.03",
                 "0",
             ),
-            ("minimax-m2", "MiniMax M2", "2.10", "8.40", "0.21", "0"),
+            ("minimax-m2", "MiniMax M2", "0.27", "0.95", "0.03", "0"),
             // GLM (智谱)
-            ("glm-4.7", "GLM-4.7", "2.00", "8.00", "0.40", "0"),
-            ("glm-4.6", "GLM-4.6", "2.00", "8.00", "0.40", "0"),
+            ("glm-4.7", "GLM-4.7", "0.39", "1.75", "0.04", "0"),
+            ("glm-4.6", "GLM-4.6", "0.28", "1.11", "0.03", "0"),
             // Mimo (小米)
-            ("mimo-v2-flash", "Mimo V2 Flash", "0", "0", "0", "0"),
+            ("mimo-v2-flash", "Mimo V2 Flash", "0.09", "0.29", "0.009", "0"),
         ];
 
         for (model_id, display_name, input, output, cache_read, cache_creation) in pricing_data {
