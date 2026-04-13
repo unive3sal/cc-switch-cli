@@ -7,6 +7,21 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.3.3] - 2026-04-13
+
+### Fixed
+
+- **Update / Startup Gate**: Allow `cc-switch update` to bypass startup database initialization so older installed binaries can still self-update even when the local database schema is newer than they support.
+
+### Commits (since v5.3.2)
+
+- 43a952b (update) allow self-update to bypass startup database gates
+
+### Thanks
+
+- Thanks `@saladday` for closing the self-update blocker and pushing the startup-gate fix across the finish line.
+- Thanks `@huanghuoguoguo` and `@KKfhfv` for the recent provider and CLI iteration that helped surface and pressure-test this patch cycle.
+
 ## [5.3.2] - 2026-04-13
 
 ### Added
