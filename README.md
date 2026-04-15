@@ -40,7 +40,6 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
 - Switch the active proxy target immediately while takeover is already running, without requiring a manual proxy restart.
 - Support importing and upgrading newer schema v8 databases through the staged migration path now expected by the current backend.
 - Keep corrected pricing data and new tracking tables aligned between migrated databases and freshly initialized local databases.
-- See the patch notes: [release-note-v5.3.1-en.md](docs/release-note-v5.3.1-en.md)
 
 ---
 

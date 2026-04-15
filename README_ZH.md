@@ -36,7 +36,6 @@
 - 在 takeover 已运行时，切换 provider 会立即更新代理目标，不再需要手动重启 proxy。
 - 支持导入并升级更新后的 schema v8 数据库，补齐当前后端所需的分阶段迁移路径。
 - 让迁移后的数据库与新建数据库在定价修正和新增跟踪表上保持一致。
-- 详细补丁说明见：[release-note-v5.3.1-zh.md](docs/release-note-v5.3.1-zh.md)
 
 ---
 
