@@ -123,6 +123,7 @@ fn serve_proxy(
                 let _ = service.stop_with_restore().await;
                 return Err(AppError::Message(err));
             }
+            crate::services::state_coordination::clear_restore_mutation_guard_bypass_env();
 
             println!("{}", highlight(crate::t!("Local Proxy Running", "本地代理已启动")));
             println!(

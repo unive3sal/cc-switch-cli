@@ -10,6 +10,7 @@ pub mod provider;
 pub mod proxy;
 pub mod skill;
 pub mod speedtest;
+pub(crate) mod state_coordination;
 pub mod stream_check;
 pub mod subscription;
 pub mod webdav;

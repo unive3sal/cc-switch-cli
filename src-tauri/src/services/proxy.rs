@@ -186,18 +186,31 @@ impl ProxyService {
     }
 
     pub async fn start(&self) -> Result<ProxyServerInfo, String> {
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
+            .await?;
         let config = self.get_config().await.map_err(|e| e.to_string())?;
-        self.start_with_resolved_config(config).await
+        self.start_with_resolved_config_unlocked(config).await
     }
 
     pub async fn start_with_runtime_config(
         &self,
         config: ProxyConfig,
     ) -> Result<ProxyServerInfo, String> {
-        self.start_with_resolved_config(config).await
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
+            .await?;
+        self.start_with_resolved_config_unlocked(config).await
     }
 
     pub async fn start_managed_session(&self, app_type: &str) -> Result<ProxyServerInfo, String> {
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
+            .await?;
+        self.start_managed_session_unlocked(app_type).await
+    }
+
+    async fn start_managed_session_unlocked(
+        &self,
+        app_type: &str,
+    ) -> Result<ProxyServerInfo, String> {
         Self::ensure_managed_sessions_supported()?;
 
         let app_type = Self::takeover_app_from_str(app_type)?;
@@ -222,6 +235,10 @@ impl ProxyService {
                 PersistedProxyRuntimeSessionKind::ManagedExternal.as_env_value(),
             )
             .env(PROXY_RUNTIME_SESSION_TOKEN_ENV_KEY, &session_token)
+            .env(
+                crate::services::state_coordination::RESTORE_GUARD_BYPASS_ENV_KEY,
+                "1",
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -277,12 +294,23 @@ impl ProxyService {
         app_type: &str,
         enabled: bool,
     ) -> Result<(), String> {
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
+            .await?;
+        self.set_managed_session_for_app_unlocked(app_type, enabled)
+            .await
+    }
+
+    async fn set_managed_session_for_app_unlocked(
+        &self,
+        app_type: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
         let app_type = Self::takeover_app_from_str(app_type)?;
 
         if enabled {
             let status = self.get_status().await;
             if !status.running {
-                self.start_managed_session(app_type.as_str()).await?;
+                self.start_managed_session_unlocked(app_type.as_str()).await?;
                 return Ok(());
             }
 
@@ -290,7 +318,7 @@ impl ProxyService {
                 .load_persisted_runtime_session()
                 .is_some_and(|session| session.kind.is_managed_external())
             {
-                self.enable_takeover_for_app(&app_type).await?;
+                self.enable_takeover_for_app_unlocked(&app_type).await?;
                 return Ok(());
             }
 
@@ -304,11 +332,11 @@ impl ProxyService {
             .load_persisted_runtime_session()
             .map(|session| session.kind.is_managed_external())
             .unwrap_or(false);
-        self.disable_takeover_for_app(&app_type, stop_server_when_last)
+        self.disable_takeover_for_app_unlocked(&app_type, stop_server_when_last)
             .await
     }
 
-    async fn start_with_resolved_config(
+    async fn start_with_resolved_config_unlocked(
         &self,
         config: ProxyConfig,
     ) -> Result<ProxyServerInfo, String> {
@@ -394,18 +422,23 @@ impl ProxyService {
     }
 
     pub async fn stop(&self) -> Result<(), String> {
-        self.stop_server().await
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
+            .await?;
+        self.stop_server_unlocked().await
     }
 
     pub async fn stop_with_restore(&self) -> Result<(), String> {
-        if let Err(error) = self.stop().await {
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
+            .await?;
+
+        if let Err(error) = self.stop_server_unlocked().await {
             log::warn!("stop proxy runtime before restore failed: {error}");
         }
 
-        self.restore_active_takeovers_on_shutdown().await
+        self.restore_active_takeovers_on_shutdown_unlocked().await
     }
 
-    async fn stop_server(&self) -> Result<(), String> {
+    async fn stop_server_unlocked(&self) -> Result<(), String> {
         let mut stopped_runtime = false;
 
         if let Some(server) = self.runtime.server.read().await.as_ref() {
@@ -518,6 +551,9 @@ impl ProxyService {
     }
 
     pub async fn update_config(&self, config: &ProxyConfig) -> Result<(), AppError> {
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
+            .await
+            .map_err(AppError::Message)?;
         self.db.update_proxy_config(config.clone()).await
     }
 
@@ -551,6 +587,9 @@ impl ProxyService {
     }
 
     pub async fn set_global_enabled(&self, enabled: bool) -> Result<GlobalProxyConfig, AppError> {
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
+            .await
+            .map_err(AppError::Message)?;
         let mut config = self.get_global_config().await?;
         config.proxy_enabled = enabled;
         self.db.update_global_proxy_config(config.clone()).await?;
@@ -582,11 +621,13 @@ impl ProxyService {
 
     pub async fn set_takeover_for_app(&self, app_type: &str, enabled: bool) -> Result<(), String> {
         let app_type = Self::takeover_app_from_str(app_type)?;
+        let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
+            .await?;
 
         if enabled {
-            self.enable_takeover_for_app(&app_type).await
+            self.enable_takeover_for_app_unlocked(&app_type).await
         } else {
-            self.disable_takeover_for_app(&app_type, true).await
+            self.disable_takeover_for_app_unlocked(&app_type, true).await
         }
     }
 
@@ -853,17 +894,19 @@ impl ProxyService {
             .map_err(|error| format!("save {} live backup failed: {error}", app_type.as_str()))
     }
 
-    async fn restore_active_takeovers_on_shutdown(&self) -> Result<(), String> {
+    async fn restore_active_takeovers_on_shutdown_unlocked(&self) -> Result<(), String> {
         for app_type in [AppType::Claude, AppType::Codex, AppType::Gemini] {
-            self.disable_takeover_for_app(&app_type, false).await?;
+            self.disable_takeover_for_app_unlocked(&app_type, false)
+                .await?;
         }
 
         Ok(())
     }
 
-    async fn enable_takeover_for_app(&self, app_type: &AppType) -> Result<(), String> {
+    async fn enable_takeover_for_app_unlocked(&self, app_type: &AppType) -> Result<(), String> {
         if !self.is_running().await {
-            self.start().await?;
+            let config = self.get_config().await.map_err(|e| e.to_string())?;
+            self.start_with_resolved_config_unlocked(config).await?;
         }
 
         let app_key = app_type.as_str();
@@ -913,7 +956,7 @@ impl ProxyService {
         Ok(())
     }
 
-    async fn disable_takeover_for_app(
+    async fn disable_takeover_for_app_unlocked(
         &self,
         app_type: &AppType,
         stop_server_when_last: bool,
@@ -967,7 +1010,7 @@ impl ProxyService {
                 .await
                 .map_err(|error| format!("check active takeovers failed: {error}"))?
         {
-            self.stop_server().await?;
+            self.stop_server_unlocked().await?;
         }
 
         Ok(())
@@ -1922,6 +1965,7 @@ mod tests {
     use serial_test::serial;
     use std::ffi::OsString;
     use std::path::Path;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tempfile::TempDir;
 
     struct ManagedRuntimeEnvGuard {
@@ -2505,6 +2549,152 @@ base_url = "https://api.openai.com/v1"
         );
 
         service.stop().await.expect("stop proxy runtime");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn takeover_mutation_waits_for_shared_restore_guard() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        std::fs::create_dir_all(
+            get_claude_settings_path()
+                .parent()
+                .expect("claude settings parent dir"),
+        )
+        .expect("create claude settings dir");
+        write_json_file(
+            &get_claude_settings_path(),
+            &json!({
+                "env": {
+                    "ANTHROPIC_API_KEY": "live-key"
+                }
+            }),
+        )
+        .expect("seed claude live config");
+
+        let db = Arc::new(Database::init().expect("create database"));
+        let provider = Provider::with_id(
+            "claude-provider".to_string(),
+            "Claude Provider".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_API_KEY": "db-key"
+                }
+            }),
+            Some("claude".to_string()),
+        );
+        db.save_provider("claude", &provider)
+            .expect("save claude provider");
+        db.set_current_provider("claude", &provider.id)
+            .expect("set current claude provider");
+
+        let service = ProxyService::new(db.clone());
+        let mut config = service.get_config().await.expect("read proxy config");
+        config.listen_port = 0;
+        service
+            .update_config(&config)
+            .await
+            .expect("update proxy config");
+
+        let guard = crate::services::state_coordination::acquire_restore_mutation_guard()
+            .await
+            .expect("acquire shared restore guard");
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_bg = Arc::clone(&completed);
+        let service_bg = service.clone();
+        let handle = tokio::spawn(async move {
+            service_bg
+                .set_takeover_for_app("claude", true)
+                .await
+                .expect("enable takeover after guard release");
+            completed_bg.store(true, Ordering::SeqCst);
+        });
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !completed.load(Ordering::SeqCst),
+            "takeover mutation should wait behind the shared restore guard"
+        );
+        assert!(
+            !handle.is_finished(),
+            "spawned takeover task should still be blocked on the shared guard"
+        );
+
+        drop(guard);
+
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("takeover task should complete after guard release")
+            .expect("takeover task should succeed");
+        assert!(
+            completed.load(Ordering::SeqCst),
+            "takeover mutation should complete once the shared guard is released"
+        );
+
+        service
+            .set_takeover_for_app("claude", false)
+            .await
+            .expect("disable takeover for cleanup");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn proxy_config_update_waits_for_shared_restore_guard() {
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+
+        let initial = service.get_config().await.expect("read initial config");
+        let mut updated = initial.clone();
+        updated.listen_port = if initial.listen_port == 15721 {
+            15722
+        } else {
+            initial.listen_port.saturating_add(1)
+        };
+        let expected_port = updated.listen_port;
+
+        let guard = crate::services::state_coordination::acquire_restore_mutation_guard()
+            .await
+            .expect("acquire shared restore guard");
+        let completed = Arc::new(AtomicBool::new(false));
+        let completed_bg = Arc::clone(&completed);
+        let service_bg = service.clone();
+        let handle = tokio::spawn(async move {
+            service_bg
+                .update_config(&updated)
+                .await
+                .expect("update proxy config after guard release");
+            completed_bg.store(true, Ordering::SeqCst);
+        });
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(
+            !completed.load(Ordering::SeqCst),
+            "proxy config update should wait behind the shared restore guard"
+        );
+        assert!(
+            !handle.is_finished(),
+            "spawned config-update task should still be blocked on the shared guard"
+        );
+
+        drop(guard);
+
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("config update task should complete after guard release")
+            .expect("config update task should succeed");
+        assert!(
+            completed.load(Ordering::SeqCst),
+            "proxy config update should complete once the shared guard is released"
+        );
+
+        assert_eq!(
+            service
+                .get_config()
+                .await
+                .expect("read config after guard release")
+                .listen_port,
+            expected_port
+        );
     }
 
     #[tokio::test]

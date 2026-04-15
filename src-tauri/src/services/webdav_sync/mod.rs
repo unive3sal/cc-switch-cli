@@ -244,7 +244,13 @@ async fn download() -> Result<WebDavSyncSummary, AppError> {
         )
         .await?;
 
-        apply_snapshot(&db_sql, &skills_zip)?;
+        {
+            let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
+                .await
+                .map_err(AppError::Message)?;
+            ensure_restore_allowed().await?;
+            apply_snapshot(&db_sql, &skills_zip)?;
+        }
         persist_sync_success_best_effort(&mut settings, &manifest_hash, snapshot.manifest_etag);
         cleanup_v1_remote(&settings, &auth).await;
 
@@ -904,7 +910,12 @@ async fn migrate_v1_to_v2() -> Result<WebDavSyncSummary, AppError> {
     .await?;
 
     // 3. 应用到本地
+    let _guard = crate::services::state_coordination::acquire_restore_mutation_guard()
+        .await
+        .map_err(AppError::Message)?;
+    ensure_restore_allowed().await?;
     apply_snapshot(&db_sql, &skills_zip)?;
+    drop(_guard);
 
     // 4. 重新上传为 V2 格式（upload 内部会 best-effort 清理 V1 远端数据）
     upload().await?;
@@ -913,6 +924,41 @@ async fn migrate_v1_to_v2() -> Result<WebDavSyncSummary, AppError> {
         decision: SyncDecision::Download,
         message: "V1 → V2 migration completed".to_string(),
     })
+}
+
+async fn ensure_restore_allowed() -> Result<(), AppError> {
+    let db = std::sync::Arc::new(Database::init()?);
+    let proxy_service = crate::services::ProxyService::new(db);
+    let status = proxy_service.get_status().await;
+    if status.running {
+        return Err(localized(
+            "webdav.sync.restore_proxy_running",
+            "本地代理正在运行，请先停止代理后再执行 WebDAV 恢复或迁移",
+            "The local proxy is running. Stop it before WebDAV restore or migration.",
+        ));
+    }
+
+    let takeover_active = proxy_service
+        .is_app_takeover_active(&crate::AppType::Claude)
+        .await
+        .map_err(AppError::Message)?
+        || proxy_service
+            .is_app_takeover_active(&crate::AppType::Codex)
+            .await
+            .map_err(AppError::Message)?
+        || proxy_service
+            .is_app_takeover_active(&crate::AppType::Gemini)
+            .await
+            .map_err(AppError::Message)?;
+    if takeover_active {
+        return Err(localized(
+            "webdav.sync.restore_takeover_active",
+            "当前仍有应用处于代理接管状态，请先关闭接管后再执行 WebDAV 恢复或迁移",
+            "An app takeover is still active. Disable takeover before WebDAV restore or migration.",
+        ));
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

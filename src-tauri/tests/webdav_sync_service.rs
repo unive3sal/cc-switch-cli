@@ -14,8 +14,10 @@ use axum::{
     Router,
 };
 use cc_switch_lib::{
-    set_webdav_sync_settings, WebDavSyncService, WebDavSyncSettings, WebDavSyncStatus,
+    set_webdav_sync_settings, AppState as CcAppState, Provider, WebDavSyncService,
+    WebDavSyncSettings, WebDavSyncStatus,
 };
+use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 
 #[path = "support.rs"]
@@ -179,6 +181,14 @@ impl TestWebDavServer {
             delete_paths: state.delete_paths.clone(),
             streamed_chunk_count: state.streamed_chunk_count,
         }
+    }
+
+    fn seed_file(&self, path: &str, bytes: Vec<u8>) {
+        self.state
+            .lock()
+            .expect("lock test WebDAV state for file seed")
+            .files
+            .insert(path.to_string(), bytes);
     }
 }
 
@@ -350,6 +360,65 @@ fn sample_settings(base_url: &str) -> WebDavSyncSettings {
         auto_sync: false,
         status: WebDavSyncStatus::default(),
     }
+}
+
+fn find_free_port() -> u16 {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind free local port");
+    listener
+        .local_addr()
+        .expect("read free local port")
+        .port()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+fn empty_zip_bytes() -> Vec<u8> {
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        let writer = zip::ZipWriter::new(&mut cursor);
+        writer.finish().expect("finish empty zip");
+    }
+    cursor.into_inner()
+}
+
+fn seed_claude_remote_provider(state: &CcAppState) {
+    let provider = Provider::with_id(
+        "claude-provider".to_string(),
+        "Claude Provider".to_string(),
+        serde_json::json!({
+            "env": {
+                "ANTHROPIC_API_KEY": "db-key"
+            }
+        }),
+        Some("claude".to_string()),
+    );
+    state
+        .db
+        .save_provider("claude", &provider)
+        .expect("save claude provider");
+    state
+        .db
+        .set_current_provider("claude", &provider.id)
+        .expect("set current claude provider");
+}
+
+fn seed_claude_live() {
+    let path = cc_switch_lib::get_claude_settings_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create claude live dir");
+    }
+    std::fs::write(
+        path,
+        serde_json::to_string_pretty(&serde_json::json!({
+            "env": {
+                "ANTHROPIC_API_KEY": "live-key"
+            }
+        }))
+        .expect("serialize claude live"),
+    )
+    .expect("write claude live");
 }
 
 fn assert_probe_round_trip(snapshot: &ServerSnapshot) {
@@ -802,4 +871,244 @@ fn server_rejects_put_when_parent_directory_is_missing() {
     });
 
     assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[test]
+fn webdav_download_rejects_when_proxy_running() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let server = TestWebDavServer::start_with_config(ServerConfig::for_manifest_readback(
+        ProbeReadback::Stored,
+        ManifestHeadBehavior::Missing,
+    ));
+    set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
+        .expect("save test WebDAV settings");
+
+    let state = CcAppState::try_new().expect("create app state");
+    seed_claude_remote_provider(&state);
+    WebDavSyncService::upload().expect("seed remote v2 snapshot");
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build test runtime");
+    runtime.block_on(async {
+        let mut config = state.proxy_service.get_config().await.expect("read proxy config");
+        config.listen_port = find_free_port();
+        state
+            .proxy_service
+            .update_config(&config)
+            .await
+            .expect("update proxy config");
+        state.proxy_service.start().await.expect("start proxy runtime");
+    });
+
+    let err = WebDavSyncService::download()
+        .expect_err("download should reject while proxy runtime is active");
+
+    assert!(
+        err.to_string().contains("代理正在运行") || err.to_string().contains("proxy is running"),
+        "unexpected error: {err}"
+    );
+
+    runtime.block_on(async {
+        state.proxy_service.stop().await.expect("stop proxy runtime");
+    });
+}
+
+#[test]
+fn webdav_migrate_v1_to_v2_rejects_when_takeover_is_active() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let server = TestWebDavServer::start(ProbeReadback::Stored);
+    set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
+        .expect("save test WebDAV settings");
+
+    let state = CcAppState::try_new().expect("create app state");
+    seed_claude_remote_provider(&state);
+    seed_claude_live();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build test runtime");
+
+    let db_sql = state
+        .db
+        .export_sql_string()
+        .expect("export local db for v1 snapshot")
+        .into_bytes();
+    let skills_zip = empty_zip_bytes();
+    let settings_sync = b"{}".to_vec();
+    let manifest = serde_json::json!({
+        "format": "cc-switch-webdav-sync",
+        "version": 1,
+        "updatedAt": "2026-04-15T00:00:00Z",
+        "updatedBy": "test",
+        "artifacts": {
+            "dbSql": {
+                "path": "db.sql",
+                "sha256": sha256_hex(&db_sql),
+                "size": db_sql.len()
+            },
+            "skillsZip": {
+                "path": "skills.zip",
+                "sha256": sha256_hex(&skills_zip),
+                "size": skills_zip.len()
+            },
+            "settingsSync": {
+                "path": "settings-sync.json",
+                "sha256": sha256_hex(&settings_sync),
+                "size": settings_sync.len()
+            }
+        }
+    });
+
+    server.seed_file(
+        "/dav/sync-root/v1/default-profile/manifest.json",
+        serde_json::to_vec(&manifest).expect("serialize v1 manifest"),
+    );
+    server.seed_file("/dav/sync-root/v1/default-profile/db.sql", db_sql);
+    server.seed_file("/dav/sync-root/v1/default-profile/skills.zip", skills_zip);
+
+    runtime.block_on(async {
+        let mut config = state.proxy_service.get_config().await.expect("read proxy config");
+        config.listen_port = find_free_port();
+        state
+            .proxy_service
+            .update_config(&config)
+            .await
+            .expect("update proxy config");
+
+        state
+            .proxy_service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect("enable takeover");
+        state
+            .proxy_service
+            .stop()
+            .await
+            .expect("stop runtime but keep takeover state");
+
+        let takeover = state
+            .proxy_service
+            .get_takeover_status()
+            .await
+            .expect("read takeover status");
+        assert!(takeover.claude, "takeover should remain active after stop");
+        assert!(
+            !state.proxy_service.is_running().await,
+            "runtime should be stopped so migrate hits takeover preflight"
+        );
+    });
+
+    let err = WebDavSyncService::migrate_v1_to_v2()
+        .expect_err("migration should reject while takeover remains active");
+
+    assert!(
+        err.to_string().contains("接管") || err.to_string().contains("takeover"),
+        "unexpected error: {err}"
+    );
+
+    runtime.block_on(async {
+        state
+            .proxy_service
+            .set_takeover_for_app("claude", false)
+            .await
+            .expect("clear takeover state");
+    });
+}
+
+#[test]
+fn webdav_download_rejects_when_takeover_artifacts_exist_even_if_enabled_flag_is_cleared() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    let _home = ensure_test_home();
+
+    let server = TestWebDavServer::start_with_config(ServerConfig::for_manifest_readback(
+        ProbeReadback::Stored,
+        ManifestHeadBehavior::Missing,
+    ));
+    set_webdav_sync_settings(Some(sample_settings(&server.base_url)))
+        .expect("save test WebDAV settings");
+
+    let state = CcAppState::try_new().expect("create app state");
+    seed_claude_remote_provider(&state);
+    seed_claude_live();
+    WebDavSyncService::upload().expect("seed remote v2 snapshot");
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build test runtime");
+    runtime.block_on(async {
+        let mut config = state.proxy_service.get_config().await.expect("read proxy config");
+        config.listen_port = find_free_port();
+        state
+            .proxy_service
+            .update_config(&config)
+            .await
+            .expect("update proxy config");
+
+        state
+            .proxy_service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect("enable takeover");
+        state
+            .proxy_service
+            .stop()
+            .await
+            .expect("stop runtime but keep takeover artifacts");
+
+        let mut app_proxy = state
+            .db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("read claude proxy config");
+        app_proxy.enabled = false;
+        state
+            .db
+            .update_proxy_config_for_app(app_proxy)
+            .await
+            .expect("clear enabled flag while keeping takeover artifacts");
+
+        let takeover = state
+            .proxy_service
+            .get_takeover_status()
+            .await
+            .expect("read takeover status");
+        assert!(
+            !takeover.claude,
+            "enabled flag should appear cleared for the weak takeover view"
+        );
+        assert!(
+            state.db
+                .get_live_backup("claude")
+                .await
+                .expect("read live backup")
+                .is_some(),
+            "live backup should still exist so strong takeover predicate stays true"
+        );
+    });
+
+    let err = WebDavSyncService::download()
+        .expect_err("download should reject when takeover artifacts remain active");
+
+    assert!(
+        err.to_string().contains("接管") || err.to_string().contains("takeover"),
+        "unexpected error: {err}"
+    );
+
+    runtime.block_on(async {
+        state
+            .proxy_service
+            .set_takeover_for_app("claude", false)
+            .await
+            .expect("clear takeover artifacts for cleanup");
+    });
 }
