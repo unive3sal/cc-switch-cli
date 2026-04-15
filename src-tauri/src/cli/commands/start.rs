@@ -1,3 +1,5 @@
+use std::ffi::OsString;
+
 use clap::Subcommand;
 use indexmap::IndexMap;
 
@@ -14,24 +16,49 @@ use crate::provider::Provider;
 use crate::services::ProviderService;
 use crate::store::AppState;
 
+const CLAUDE_RESERVED_NATIVE_ARGS: &[&str] = &["--settings"];
+const CLAUDE_START_AFTER_LONG_HELP: &str = "\
+Examples:
+  cc-switch start claude demo
+  cc-switch start claude demo -- --dangerously-skip-permissions";
+
+const CODEX_START_AFTER_LONG_HELP: &str = "\
+Examples:
+  cc-switch start codex demo
+  cc-switch start codex demo -- --model gpt-5.4";
+
 #[derive(Subcommand)]
 pub enum StartCommand {
     /// Start Claude with a provider selector without switching the global current provider
+    #[command(after_long_help = CLAUDE_START_AFTER_LONG_HELP)]
     Claude {
         /// Provider selector: exact ID first, then exact Name
         selector: String,
+        /// Native Claude CLI arguments to pass through after `--`
+        #[arg(last = true, value_name = "NATIVE_ARGS")]
+        native_args: Vec<OsString>,
     },
     /// Start Codex with a provider selector without switching the global current provider
+    #[command(after_long_help = CODEX_START_AFTER_LONG_HELP)]
     Codex {
         /// Provider selector: exact ID first, then exact Name
         selector: String,
+        /// Native Codex CLI arguments to pass through after `--`
+        #[arg(last = true, value_name = "NATIVE_ARGS")]
+        native_args: Vec<OsString>,
     },
 }
 
 pub fn execute(cmd: StartCommand) -> Result<(), AppError> {
     match cmd {
-        StartCommand::Claude { selector } => start_claude(&selector),
-        StartCommand::Codex { selector } => start_codex(&selector),
+        StartCommand::Claude {
+            selector,
+            native_args,
+        } => start_claude(&selector, &native_args),
+        StartCommand::Codex {
+            selector,
+            native_args,
+        } => start_codex(&selector, &native_args),
     }
 }
 
@@ -39,7 +66,8 @@ fn get_state() -> Result<AppState, AppError> {
     AppState::try_new()
 }
 
-fn start_claude(selector: &str) -> Result<(), AppError> {
+fn start_claude(selector: &str, native_args: &[OsString]) -> Result<(), AppError> {
+    reject_reserved_native_args(native_args, "Claude", CLAUDE_RESERVED_NATIVE_ARGS)?;
     start_with(
         selector,
         "Claude",
@@ -50,12 +78,12 @@ fn start_claude(selector: &str) -> Result<(), AppError> {
         |provider| {
             ensure_temp_launch_supported()?;
             let prepared = prepare_launch(provider, &std::env::temp_dir())?;
-            handoff_claude_and_cleanup(&prepared)
+            handoff_claude_and_cleanup(&prepared, native_args)
         },
     )
 }
 
-fn start_codex(selector: &str) -> Result<(), AppError> {
+fn start_codex(selector: &str, native_args: &[OsString]) -> Result<(), AppError> {
     start_with(
         selector,
         "Codex",
@@ -66,9 +94,43 @@ fn start_codex(selector: &str) -> Result<(), AppError> {
         |provider| {
             ensure_codex_temp_launch_supported()?;
             let prepared = prepare_codex_launch(provider, &std::env::temp_dir())?;
-            handoff_codex_and_cleanup(&prepared)
+            handoff_codex_and_cleanup(&prepared, native_args)
         },
     )
+}
+
+fn reject_reserved_native_args(
+    native_args: &[OsString],
+    app_name: &str,
+    reserved_args: &[&str],
+) -> Result<(), AppError> {
+    let Some(conflicting_arg) = native_args.iter().find(|arg| {
+        reserved_args
+            .iter()
+            .any(|reserved| is_reserved_native_arg(arg, reserved))
+    }) else {
+        return Ok(());
+    };
+
+    let conflicting_arg = conflicting_arg.to_string_lossy();
+    let app_slug = app_name.to_ascii_lowercase();
+    Err(AppError::localized(
+        "cli.start.reserved_native_arg",
+        format!(
+            "`{conflicting_arg}` 不能通过 `cc-switch start {app_slug}` 透传，因为该参数由 cc-switch 管理。"
+        ),
+        format!(
+            "`{conflicting_arg}` cannot be passed through `cc-switch start {app_slug}` because this flag is managed by cc-switch."
+        ),
+    ))
+}
+
+fn is_reserved_native_arg(arg: &OsString, reserved_arg: &str) -> bool {
+    let arg = arg.to_string_lossy();
+    arg == reserved_arg
+        || arg
+            .strip_prefix(reserved_arg)
+            .is_some_and(|suffix| suffix.starts_with('='))
 }
 
 fn start_with<Load, Launch>(
@@ -86,9 +148,12 @@ where
     launch_provider(&provider)
 }
 
-fn handoff_claude_and_cleanup(prepared: &PreparedClaudeLaunch) -> Result<(), AppError> {
+fn handoff_claude_and_cleanup(
+    prepared: &PreparedClaudeLaunch,
+    native_args: &[OsString],
+) -> Result<(), AppError> {
     finish_launch(
-        exec_prepared_claude(prepared),
+        exec_prepared_claude(prepared, native_args),
         prepared.cleanup_settings_file(),
         "Claude",
         "临时设置文件",
@@ -97,9 +162,12 @@ fn handoff_claude_and_cleanup(prepared: &PreparedClaudeLaunch) -> Result<(), App
     )
 }
 
-fn handoff_codex_and_cleanup(prepared: &PreparedCodexLaunch) -> Result<(), AppError> {
+fn handoff_codex_and_cleanup(
+    prepared: &PreparedCodexLaunch,
+    native_args: &[OsString],
+) -> Result<(), AppError> {
     finish_launch(
-        exec_prepared_codex(prepared),
+        exec_prepared_codex(prepared, native_args),
         prepared.cleanup_home_dir(),
         "Codex",
         "临时配置目录",
@@ -185,6 +253,7 @@ fn resolve_provider_selector(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::ffi::OsString;
 
     fn provider(id: &str, name: &str) -> Provider {
         Provider::with_id(
@@ -197,6 +266,37 @@ mod tests {
             }),
             None,
         )
+    }
+
+    #[test]
+    fn claude_rejects_reserved_settings_native_arg() {
+        let err = reject_reserved_native_args(
+            &[OsString::from("--settings")],
+            "Claude",
+            CLAUDE_RESERVED_NATIVE_ARGS,
+        )
+        .expect_err("reserved Claude args should be rejected");
+
+        assert!(err.to_string().contains("--settings"));
+        assert!(err.to_string().contains("cc-switch start claude"));
+    }
+
+    #[test]
+    fn claude_rejects_reserved_settings_equals_native_arg() {
+        let err = reject_reserved_native_args(
+            &[OsString::from("--settings=/tmp/other.json")],
+            "Claude",
+            CLAUDE_RESERVED_NATIVE_ARGS,
+        )
+        .expect_err("reserved Claude args should be rejected");
+
+        assert!(err.to_string().contains("--settings=/tmp/other.json"));
+    }
+
+    #[test]
+    fn codex_allows_non_reserved_native_args() {
+        reject_reserved_native_args(&[OsString::from("--model")], "Codex", &[])
+            .expect("Codex passthrough args should remain allowed");
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -80,22 +81,29 @@ pub(crate) fn ensure_temp_launch_supported() -> Result<(), AppError> {
 }
 
 #[cfg(unix)]
-pub(crate) fn build_handoff_command(prepared: &PreparedClaudeLaunch) -> std::process::Command {
+pub(crate) fn build_handoff_command(
+    prepared: &PreparedClaudeLaunch,
+    native_args: &[OsString],
+) -> std::process::Command {
     let mut command = std::process::Command::new("/bin/sh");
-    command
-        .arg("-c")
-        .arg("\"$1\" --settings \"$2\"; status=$?; rm -f -- \"$2\"; exit $status");
+    command.arg("-c").arg(
+        "claude_bin=\"$1\"; settings_path=\"$2\"; shift 2; exit_status=0; cleanup() { rm -f -- \"$settings_path\"; cleanup_status=$?; if [ \"$cleanup_status\" -ne 0 ]; then printf '%s\\n' \"cc-switch: failed to remove temporary Claude settings file: $settings_path\" >&2; if [ \"$exit_status\" -eq 0 ]; then exit_status=$cleanup_status; fi; fi; }; on_signal() { exit_status=\"$1\"; trap - INT TERM HUP; cleanup; exit \"$exit_status\"; }; trap 'on_signal 130' INT; trap 'on_signal 143' TERM; trap 'on_signal 129' HUP; \"$claude_bin\" --settings \"$settings_path\" \"$@\"; exit_status=$?; cleanup; exit \"$exit_status\"",
+    );
     command.arg("cc-switch-claude-handoff");
     command.arg(&prepared.executable);
     command.arg(&prepared.settings_path);
+    command.args(native_args);
     command
 }
 
 #[cfg(unix)]
-pub(crate) fn exec_prepared_claude(prepared: &PreparedClaudeLaunch) -> Result<(), AppError> {
+pub(crate) fn exec_prepared_claude(
+    prepared: &PreparedClaudeLaunch,
+    native_args: &[OsString],
+) -> Result<(), AppError> {
     use std::os::unix::process::CommandExt;
 
-    let exec_err = build_handoff_command(prepared).exec();
+    let exec_err = build_handoff_command(prepared, native_args).exec();
     Err(AppError::localized(
         "claude.temp_launch_exec_failed",
         format!("启动 Claude 失败: {exec_err}"),
@@ -104,7 +112,10 @@ pub(crate) fn exec_prepared_claude(prepared: &PreparedClaudeLaunch) -> Result<()
 }
 
 #[cfg(not(unix))]
-pub(crate) fn exec_prepared_claude(_prepared: &PreparedClaudeLaunch) -> Result<(), AppError> {
+pub(crate) fn exec_prepared_claude(
+    _prepared: &PreparedClaudeLaunch,
+    _native_args: &[OsString],
+) -> Result<(), AppError> {
     Err(AppError::localized(
         "claude.temp_launch_unsupported_platform",
         "当前平台暂不支持在当前终端临时启动 Claude。".to_string(),
@@ -235,7 +246,25 @@ mod tests {
     use serde_json::{json, Value};
     #[cfg(unix)]
     use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+    #[cfg(unix)]
+    use std::process::Stdio;
+    #[cfg(unix)]
+    use std::time::Duration;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    fn write_test_executable(temp_dir: &TempDir, name: &str, body: &str) -> PathBuf {
+        let path = temp_dir.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write stub executable");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("stat stub executable")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).expect("chmod stub executable");
+        path
+    }
 
     #[cfg(unix)]
     #[test]
@@ -244,8 +273,13 @@ mod tests {
             executable: PathBuf::from("/usr/local/bin/claude"),
             settings_path: PathBuf::from("/tmp/cc-switch-claude-settings.json"),
         };
+        let native_args = vec![
+            OsString::from("--dangerously-skip-permissions"),
+            OsString::from("--model"),
+            OsString::from("sonnet"),
+        ];
 
-        let command = build_handoff_command(&prepared);
+        let command = build_handoff_command(&prepared, &native_args);
         let args: Vec<OsString> = command.get_args().map(|arg| arg.to_os_string()).collect();
 
         assert_eq!(command.get_program(), std::path::Path::new("/bin/sh"));
@@ -254,13 +288,78 @@ mod tests {
             vec![
                 OsString::from("-c"),
                 OsString::from(
-                    "\"$1\" --settings \"$2\"; status=$?; rm -f -- \"$2\"; exit $status"
+                    "claude_bin=\"$1\"; settings_path=\"$2\"; shift 2; exit_status=0; cleanup() { rm -f -- \"$settings_path\"; cleanup_status=$?; if [ \"$cleanup_status\" -ne 0 ]; then printf '%s\\n' \"cc-switch: failed to remove temporary Claude settings file: $settings_path\" >&2; if [ \"$exit_status\" -eq 0 ]; then exit_status=$cleanup_status; fi; fi; }; on_signal() { exit_status=\"$1\"; trap - INT TERM HUP; cleanup; exit \"$exit_status\"; }; trap 'on_signal 130' INT; trap 'on_signal 143' TERM; trap 'on_signal 129' HUP; \"$claude_bin\" --settings \"$settings_path\" \"$@\"; exit_status=$?; cleanup; exit \"$exit_status\""
                 ),
                 OsString::from("cc-switch-claude-handoff"),
                 OsString::from("/usr/local/bin/claude"),
                 OsString::from("/tmp/cc-switch-claude-settings.json"),
+                OsString::from("--dangerously-skip-permissions"),
+                OsString::from("--model"),
+                OsString::from("sonnet"),
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interrupting_handoff_still_cleans_up_temp_settings() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let executable = write_test_executable(
+            &temp_dir,
+            "claude-stub.sh",
+            "trap 'exit 130' INT TERM HUP\nwhile :; do sleep 1; done",
+        );
+        let settings_path = temp_dir.path().join("cc-switch-claude-settings.json");
+        std::fs::write(&settings_path, "{}").expect("seed temp settings");
+
+        let prepared = PreparedClaudeLaunch {
+            executable,
+            settings_path: settings_path.clone(),
+        };
+        let mut command = build_handoff_command(&prepared, &[]);
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+
+        let mut child = command.spawn().expect("spawn handoff");
+        std::thread::sleep(Duration::from_millis(150));
+        let kill_result = unsafe { libc::kill(-(child.id() as i32), libc::SIGINT) };
+        assert_eq!(kill_result, 0, "send SIGINT to handoff process group");
+
+        let status = child.wait().expect("wait for handoff");
+        assert_eq!(status.code(), Some(130));
+        assert!(
+            !settings_path.exists(),
+            "temporary settings file should be removed after interrupt"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_failure_after_successful_handoff_surfaces_nonzero_exit() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let executable = write_test_executable(&temp_dir, "claude-stub.sh", "exit 0");
+        let prepared = PreparedClaudeLaunch {
+            executable,
+            settings_path: PathBuf::from("."),
+        };
+
+        let mut command = build_handoff_command(&prepared, &[]);
+        command.current_dir(temp_dir.path());
+        let output = command.output().expect("run handoff");
+
+        assert!(
+            !output.status.success(),
+            "cleanup failure should not look like a successful handoff"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("failed to remove temporary Claude settings file"));
     }
 
     #[test]

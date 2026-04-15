@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::Path;
 
 use crate::app_config::AppType;
@@ -53,7 +54,8 @@ fn handoff_to_codex(
     terminal: &mut TuiTerminal,
     prepared: &PreparedCodexLaunch,
 ) -> Result<(), AppError> {
-    terminal.with_terminal_restored_for_handoff(|| exec_prepared_codex(prepared))
+    let native_args = Vec::<OsString>::new();
+    terminal.with_terminal_restored_for_handoff(|| exec_prepared_codex(prepared, &native_args))
 }
 
 fn try_launch_with<Support, Prepare, Handoff>(

@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -69,22 +70,29 @@ pub(crate) fn ensure_temp_launch_supported() -> Result<(), AppError> {
 }
 
 #[cfg(unix)]
-pub(crate) fn build_handoff_command(prepared: &PreparedCodexLaunch) -> std::process::Command {
+pub(crate) fn build_handoff_command(
+    prepared: &PreparedCodexLaunch,
+    native_args: &[OsString],
+) -> std::process::Command {
     let mut command = std::process::Command::new("/bin/sh");
-    command
-        .arg("-c")
-        .arg("export CODEX_HOME=\"$1\"; \"$2\"; status=$?; rm -rf -- \"$1\"; exit $status");
+    command.arg("-c").arg(
+        "codex_home=\"$1\"; codex_bin=\"$2\"; shift 2; exit_status=0; cleanup() { rm -rf -- \"$codex_home\"; cleanup_status=$?; if [ \"$cleanup_status\" -ne 0 ]; then printf '%s\\n' \"cc-switch: failed to remove temporary Codex home: $codex_home\" >&2; if [ \"$exit_status\" -eq 0 ]; then exit_status=$cleanup_status; fi; fi; }; on_signal() { exit_status=\"$1\"; trap - INT TERM HUP; cleanup; exit \"$exit_status\"; }; trap 'on_signal 130' INT; trap 'on_signal 143' TERM; trap 'on_signal 129' HUP; export CODEX_HOME=\"$codex_home\"; \"$codex_bin\" \"$@\"; exit_status=$?; cleanup; exit \"$exit_status\"",
+    );
     command.arg("cc-switch-codex-handoff");
     command.arg(&prepared.codex_home);
     command.arg(&prepared.executable);
+    command.args(native_args);
     command
 }
 
 #[cfg(unix)]
-pub(crate) fn exec_prepared_codex(prepared: &PreparedCodexLaunch) -> Result<(), AppError> {
+pub(crate) fn exec_prepared_codex(
+    prepared: &PreparedCodexLaunch,
+    native_args: &[OsString],
+) -> Result<(), AppError> {
     use std::os::unix::process::CommandExt;
 
-    let exec_err = build_handoff_command(prepared).exec();
+    let exec_err = build_handoff_command(prepared, native_args).exec();
     Err(AppError::localized(
         "codex.temp_launch_exec_failed",
         format!("启动 Codex 失败: {exec_err}"),
@@ -93,7 +101,10 @@ pub(crate) fn exec_prepared_codex(prepared: &PreparedCodexLaunch) -> Result<(), 
 }
 
 #[cfg(not(unix))]
-pub(crate) fn exec_prepared_codex(_prepared: &PreparedCodexLaunch) -> Result<(), AppError> {
+pub(crate) fn exec_prepared_codex(
+    _prepared: &PreparedCodexLaunch,
+    _native_args: &[OsString],
+) -> Result<(), AppError> {
     Err(AppError::localized(
         "codex.temp_launch_unsupported_platform",
         "当前平台暂不支持在当前终端临时启动 Codex。".to_string(),
@@ -262,7 +273,25 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::ffi::OsString;
+    #[cfg(unix)]
+    use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+    #[cfg(unix)]
+    use std::process::Stdio;
+    #[cfg(unix)]
+    use std::time::Duration;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    fn write_test_executable(temp_dir: &TempDir, name: &str, body: &str) -> PathBuf {
+        let path = temp_dir.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write stub executable");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("stat stub executable")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).expect("chmod stub executable");
+        path
+    }
 
     fn provider_with(config: &str, auth: Option<Value>) -> Provider {
         let mut settings = serde_json::Map::new();
@@ -294,8 +323,9 @@ mod tests {
             executable: PathBuf::from("/usr/local/bin/codex"),
             codex_home: PathBuf::from("/tmp/cc-switch-codex-home"),
         };
+        let native_args = vec![OsString::from("--model"), OsString::from("gpt-5.4")];
 
-        let command = build_handoff_command(&prepared);
+        let command = build_handoff_command(&prepared, &native_args);
         let args: Vec<OsString> = command.get_args().map(|arg| arg.to_os_string()).collect();
 
         assert_eq!(command.get_program(), std::path::Path::new("/bin/sh"));
@@ -304,13 +334,79 @@ mod tests {
             vec![
                 OsString::from("-c"),
                 OsString::from(
-                    "export CODEX_HOME=\"$1\"; \"$2\"; status=$?; rm -rf -- \"$1\"; exit $status"
+                    "codex_home=\"$1\"; codex_bin=\"$2\"; shift 2; exit_status=0; cleanup() { rm -rf -- \"$codex_home\"; cleanup_status=$?; if [ \"$cleanup_status\" -ne 0 ]; then printf '%s\\n' \"cc-switch: failed to remove temporary Codex home: $codex_home\" >&2; if [ \"$exit_status\" -eq 0 ]; then exit_status=$cleanup_status; fi; fi; }; on_signal() { exit_status=\"$1\"; trap - INT TERM HUP; cleanup; exit \"$exit_status\"; }; trap 'on_signal 130' INT; trap 'on_signal 143' TERM; trap 'on_signal 129' HUP; export CODEX_HOME=\"$codex_home\"; \"$codex_bin\" \"$@\"; exit_status=$?; cleanup; exit \"$exit_status\""
                 ),
                 OsString::from("cc-switch-codex-handoff"),
                 OsString::from("/tmp/cc-switch-codex-home"),
                 OsString::from("/usr/local/bin/codex"),
+                OsString::from("--model"),
+                OsString::from("gpt-5.4"),
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn interrupting_handoff_still_cleans_up_temp_codex_home() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let executable = write_test_executable(
+            &temp_dir,
+            "codex-stub.sh",
+            "trap 'exit 130' INT TERM HUP\nwhile :; do sleep 1; done",
+        );
+        let codex_home = temp_dir.path().join("cc-switch-codex-home");
+        std::fs::create_dir_all(&codex_home).expect("create temp codex home");
+        std::fs::write(codex_home.join("config.toml"), "model = \"gpt-5.4\"\n")
+            .expect("seed config");
+
+        let prepared = PreparedCodexLaunch {
+            executable,
+            codex_home: codex_home.clone(),
+        };
+        let mut command = build_handoff_command(&prepared, &[]);
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+
+        let mut child = command.spawn().expect("spawn handoff");
+        std::thread::sleep(Duration::from_millis(150));
+        let kill_result = unsafe { libc::kill(-(child.id() as i32), libc::SIGINT) };
+        assert_eq!(kill_result, 0, "send SIGINT to handoff process group");
+
+        let status = child.wait().expect("wait for handoff");
+        assert_eq!(status.code(), Some(130));
+        assert!(
+            !codex_home.exists(),
+            "temporary Codex home should be removed after interrupt"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_failure_after_successful_handoff_surfaces_nonzero_exit() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let executable = write_test_executable(&temp_dir, "codex-stub.sh", "exit 0");
+        let prepared = PreparedCodexLaunch {
+            executable,
+            codex_home: PathBuf::from("."),
+        };
+
+        let mut command = build_handoff_command(&prepared, &[]);
+        command.current_dir(temp_dir.path());
+        let output = command.output().expect("run handoff");
+
+        assert!(
+            !output.status.success(),
+            "cleanup failure should not look like a successful handoff"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("failed to remove temporary Codex home"));
     }
 
     #[test]

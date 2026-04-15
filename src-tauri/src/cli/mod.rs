@@ -94,6 +94,7 @@ pub fn generate_completions(shell: Shell) {
 #[cfg(test)]
 mod tests {
     use clap::{CommandFactory, Parser};
+    use std::ffi::OsString;
 
     use super::{Cli, Commands};
 
@@ -184,11 +185,60 @@ mod tests {
         let cli = Cli::parse_from(["cc-switch", "start", "claude", "demo"]);
 
         match cli.command {
-            Some(Commands::Start(super::commands::start::StartCommand::Claude { selector })) => {
+            Some(Commands::Start(super::commands::start::StartCommand::Claude {
+                selector,
+                native_args,
+            })) => {
                 assert_eq!(selector, "demo");
+                assert!(native_args.is_empty());
             }
             _ => panic!("expected start claude command"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parses_start_claude_native_args_after_double_dash() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "start",
+            "claude",
+            "demo",
+            "--",
+            "--dangerously-skip-permissions",
+        ]);
+
+        match cli.command {
+            Some(Commands::Start(super::commands::start::StartCommand::Claude {
+                selector,
+                native_args,
+            })) => {
+                assert_eq!(selector, "demo");
+                assert_eq!(
+                    native_args,
+                    vec![OsString::from("--dangerously-skip-permissions")]
+                );
+            }
+            _ => panic!("expected start claude command with native args"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_start_claude_native_args_without_double_dash() {
+        let result = Cli::try_parse_from([
+            "cc-switch",
+            "start",
+            "claude",
+            "demo",
+            "--dangerously-skip-permissions",
+        ]);
+        let rendered = match result {
+            Ok(_) => panic!("native args without `--` should be rejected"),
+            Err(err) => err.to_string(),
+        };
+
+        assert!(rendered.contains("-- --dangerously-skip-permissions"));
     }
 
     #[cfg(unix)]
@@ -197,11 +247,82 @@ mod tests {
         let cli = Cli::parse_from(["cc-switch", "start", "codex", "demo"]);
 
         match cli.command {
-            Some(Commands::Start(super::commands::start::StartCommand::Codex { selector })) => {
+            Some(Commands::Start(super::commands::start::StartCommand::Codex {
+                selector,
+                native_args,
+            })) => {
                 assert_eq!(selector, "demo");
+                assert!(native_args.is_empty());
             }
             _ => panic!("expected start codex command"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parses_start_codex_multiple_native_args_after_double_dash() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "start",
+            "codex",
+            "demo",
+            "--",
+            "--model",
+            "gpt-5.4",
+            "--profile",
+            "local",
+        ]);
+
+        match cli.command {
+            Some(Commands::Start(super::commands::start::StartCommand::Codex {
+                selector,
+                native_args,
+            })) => {
+                assert_eq!(selector, "demo");
+                assert_eq!(
+                    native_args,
+                    vec![
+                        OsString::from("--model"),
+                        OsString::from("gpt-5.4"),
+                        OsString::from("--profile"),
+                        OsString::from("local"),
+                    ]
+                );
+            }
+            _ => panic!("expected start codex command with native args"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_claude_help_mentions_double_dash_passthrough_examples() {
+        let mut cmd = Cli::command();
+        let start = cmd
+            .find_subcommand_mut("start")
+            .expect("start subcommand should exist");
+        let claude = start
+            .find_subcommand_mut("claude")
+            .expect("claude subcommand should exist");
+        let help = claude.render_long_help().to_string();
+
+        assert!(help.contains("Native Claude CLI arguments to pass through after `--`"));
+        assert!(help.contains("cc-switch start claude demo -- --dangerously-skip-permissions"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn start_codex_help_mentions_double_dash_passthrough_examples() {
+        let mut cmd = Cli::command();
+        let start = cmd
+            .find_subcommand_mut("start")
+            .expect("start subcommand should exist");
+        let codex = start
+            .find_subcommand_mut("codex")
+            .expect("codex subcommand should exist");
+        let help = codex.render_long_help().to_string();
+
+        assert!(help.contains("Native Codex CLI arguments to pass through after `--`"));
+        assert!(help.contains("cc-switch start codex demo -- --model gpt-5.4"));
     }
 
     #[test]
