@@ -47,6 +47,8 @@ fn current_timestamp() -> i64 {
 #[cfg(test)]
 fn state_from_config(config: MultiAppConfig) -> AppState {
     let db = std::sync::Arc::new(crate::Database::memory().expect("create memory database"));
+    db.migrate_from_json(&config)
+        .expect("seed memory database from config");
     AppState {
         db: db.clone(),
         config: std::sync::RwLock::new(config),

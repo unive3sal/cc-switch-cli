@@ -65,6 +65,8 @@ pub fn lock_test_mutex() -> MutexGuard<'static, ()> {
 pub fn state_from_config(config: MultiAppConfig) -> AppState {
     let _ = ensure_test_home();
     let db = Arc::new(Database::init().expect("create database"));
+    db.migrate_from_json(&config)
+        .expect("seed database from config");
     AppState {
         db: db.clone(),
         config: RwLock::new(config),
