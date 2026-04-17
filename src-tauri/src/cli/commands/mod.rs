@@ -1,3 +1,4 @@
+pub mod completions;
 pub mod config;
 mod config_common;
 pub mod config_webdav;

@@ -220,6 +220,12 @@ async fn execute_async(cmd: UpdateCommand) -> Result<(), AppError> {
         "{}",
         info("Run `cc-switch --version` to verify the installed version.")
     );
+    println!(
+        "{}",
+        info(
+            "If you want to install or refresh managed bash/zsh completions, run: `cc-switch completions install`."
+        )
+    );
     Ok(())
 }
 

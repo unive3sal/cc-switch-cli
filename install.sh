@@ -311,6 +311,33 @@ check_path() {
   printf '  Then restart your shell or run:\n\n    %s\n\n' "${cmd}"
 }
 
+detect_current_shell_name() {
+  local shell_name
+  shell_name="$(basename "${SHELL:-}")"
+
+  if [[ -n "${shell_name}" ]]; then
+    printf '%s' "${shell_name}"
+  fi
+}
+
+print_completions_hint() {
+  local shell_name="$1"
+
+  case "${shell_name}" in
+    bash|zsh)
+      printf '  Optional: run \033[1m%s completions install --activate\033[0m to install and activate shell completions.\n' "${BIN_NAME}"
+      printf '  Conservative path: \033[1m%s completions install\033[0m\n' "${BIN_NAME}"
+      ;;
+    "")
+      printf '  Optional: run \033[1m%s completions install --activate\033[0m for managed bash/zsh completions, or use \033[1m%s completions <shell>\033[0m for raw generation.\n' "${BIN_NAME}" "${BIN_NAME}"
+      ;;
+    *)
+      printf '  Managed completion install currently supports bash and zsh.\n'
+      printf '  For %s, use the raw generator path: \033[1m%s completions %s\033[0m\n' "${shell_name}" "${BIN_NAME}" "${shell_name}"
+      ;;
+  esac
+}
+
 # ── main ─────────────────────────────────────────────────────────────
 
 main() {
@@ -333,6 +360,12 @@ main() {
   info "Installed ${BIN_NAME} to ${TARGET}"
   check_path_shadow
   check_path
+  local shell_name
+  shell_name="$(detect_current_shell_name)"
+  if [[ -n "${shell_name}" ]]; then
+    info "Detected shell: ${shell_name}"
+  fi
+  print_completions_hint "${shell_name}"
   printf '  Run \033[1m%s --version\033[0m to verify.\n\n' "${BIN_NAME}"
 }
 

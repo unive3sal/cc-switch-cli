@@ -42,16 +42,13 @@ fn run(cli: Cli) -> Result<(), AppError> {
         Some(Commands::Start(cmd)) => cc_switch_lib::cli::commands::start::execute(cmd),
         Some(Commands::Env(cmd)) => cc_switch_lib::cli::commands::env::execute(cmd, cli.app),
         Some(Commands::Update(cmd)) => cc_switch_lib::cli::commands::update::execute(cmd),
-        Some(Commands::Completions { shell }) => {
-            cc_switch_lib::cli::generate_completions(shell);
-            Ok(())
-        }
+        Some(Commands::Completions(cmd)) => cc_switch_lib::cli::commands::completions::execute(cmd),
     }
 }
 
 fn command_requires_startup_state(command: &Option<Commands>) -> bool {
     match command {
-        Some(Commands::Completions { .. }) | Some(Commands::Update(_)) => false,
+        Some(Commands::Completions(_)) | Some(Commands::Update(_)) => false,
         _ => true,
     }
 }
@@ -105,11 +102,24 @@ mod tests {
     #[test]
     fn update_and_completions_skip_startup_state() {
         let update = Cli::parse_from(["cc-switch", "update"]);
-        let completions = Cli::parse_from(["cc-switch", "completions", "bash"]);
+        let completions_generate = Cli::parse_from(["cc-switch", "completions", "bash"]);
+        let completions_install = Cli::parse_from(["cc-switch", "completions", "install"]);
+        let completions_status = Cli::parse_from(["cc-switch", "completions", "status"]);
+        let completions_uninstall =
+            Cli::parse_from(["cc-switch", "completions", "uninstall", "--shell", "bash"]);
         let provider = Cli::parse_from(["cc-switch", "provider", "list"]);
 
         assert!(!command_requires_startup_state(&update.command));
-        assert!(!command_requires_startup_state(&completions.command));
+        assert!(!command_requires_startup_state(
+            &completions_generate.command
+        ));
+        assert!(!command_requires_startup_state(
+            &completions_install.command
+        ));
+        assert!(!command_requires_startup_state(&completions_status.command));
+        assert!(!command_requires_startup_state(
+            &completions_uninstall.command
+        ));
         assert!(command_requires_startup_state(&provider.command));
     }
 

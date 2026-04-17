@@ -410,7 +410,12 @@ Shell 补全、环境管理等实用功能。
 
 ```bash
 # Shell 补全
-cc-switch completions <shell>        # 生成 shell 补全（bash/zsh/fish/powershell）
+cc-switch completions install --activate   # 推荐：为 bash/zsh 安装并激活
+cc-switch completions install              # 保守模式：只安装，不改 rc
+cc-switch completions status               # 查看受管补全状态
+cc-switch completions uninstall            # 移除受管补全文件和激活块
+cc-switch completions bash                 # 兼容保留的 raw generator 路径
+cc-switch completions fish                 # 其他 shell 继续走 raw generate
 
 # 环境管理
 cc-switch env check                  # 检查环境冲突
@@ -420,6 +425,8 @@ cc-switch env list                   # 列出环境变量
 cc-switch update                     # 更新到最新版本
 cc-switch update --version vX.Y.Z    # 更新到指定版本
 ```
+
+自动安装 / 激活当前只支持 `bash` 和 `zsh`。其他 shell 仍然可以通过 raw generator 路径使用，例如 `cc-switch completions fish`。
 
 ---
 

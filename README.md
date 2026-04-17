@@ -409,7 +409,12 @@ Shell completions, environment management, and other utilities.
 
 ```bash
 # Shell completions
-cc-switch completions <shell>        # Generate shell completions (bash/zsh/fish/powershell)
+cc-switch completions install --activate   # Recommended: install + activate for bash/zsh
+cc-switch completions install              # Conservative: install only, no rc edits
+cc-switch completions status               # Inspect managed completion status
+cc-switch completions uninstall            # Remove managed completion assets
+cc-switch completions bash                 # Compatibility raw generator path
+cc-switch completions fish                 # Raw generation still works for non-managed shells
 
 # Environment management
 cc-switch env check                  # Check for environment conflicts
@@ -419,6 +424,8 @@ cc-switch env list                   # List environment variables
 cc-switch update                     # Update to latest release
 cc-switch update --version vX.Y.Z    # Update to a specific version
 ```
+
+Automated install/activation currently targets `bash` and `zsh` only. Other shells remain available through the raw generator path, for example `cc-switch completions fish`.
 
 ---
 

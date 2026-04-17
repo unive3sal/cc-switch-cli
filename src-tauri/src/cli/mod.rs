@@ -1,5 +1,6 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use clap_complete::Shell;
+use std::io::Write;
 
 mod claude_temp_launch;
 mod codex_temp_launch;
@@ -75,20 +76,21 @@ pub enum Commands {
     #[command(alias = "ui")]
     Interactive,
 
-    /// Generate shell completions
-    Completions {
-        /// The shell to generate completions for
-        #[arg(value_enum)]
-        shell: Shell,
-    },
+    /// Generate, install, inspect, or uninstall shell completions
+    Completions(commands::completions::CompletionsCommand),
 }
 
 /// Generate shell completions
 pub fn generate_completions(shell: Shell) {
-    use clap::CommandFactory;
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    generate_completions_to(shell, &mut handle);
+}
+
+pub(crate) fn generate_completions_to<W: Write>(shell: Shell, writer: &mut W) {
     let mut cmd = Cli::command();
     let name = cmd.get_name().to_string();
-    clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
+    clap_complete::generate(shell, &mut cmd, name, writer);
 }
 
 #[cfg(test)]
@@ -97,6 +99,9 @@ mod tests {
     use std::ffi::OsString;
 
     use super::{Cli, Commands};
+    use crate::cli::commands::completions::{
+        CompletionLifecycleCommand, CompletionsAction, ManagedShellSelection,
+    };
 
     #[test]
     fn long_help_mentions_prompts_and_proxy_routes() {
@@ -548,5 +553,112 @@ mod tests {
             }
             _ => panic!("expected skills repos disable command"),
         }
+    }
+
+    #[test]
+    fn parses_completions_bash_generator_path() {
+        let cli = Cli::parse_from(["cc-switch", "completions", "bash"]);
+
+        match cli.command {
+            Some(Commands::Completions(command)) => {
+                assert_eq!(command.shell, Some(clap_complete::Shell::Bash));
+                assert!(command.action.is_none());
+            }
+            _ => panic!("expected completions generator command"),
+        }
+    }
+
+    #[test]
+    fn parses_completions_zsh_generator_path() {
+        let cli = Cli::parse_from(["cc-switch", "completions", "zsh"]);
+
+        match cli.command {
+            Some(Commands::Completions(command)) => {
+                assert_eq!(command.shell, Some(clap_complete::Shell::Zsh));
+                assert!(command.action.is_none());
+            }
+            _ => panic!("expected completions generator command"),
+        }
+    }
+
+    #[test]
+    fn parses_completions_install() {
+        let cli = Cli::parse_from(["cc-switch", "completions", "install"]);
+
+        match cli.command {
+            Some(Commands::Completions(command)) => match command.action {
+                Some(CompletionsAction::Install(args)) => {
+                    assert_eq!(args.shell, ManagedShellSelection::Auto);
+                    assert!(!args.activate);
+                }
+                _ => panic!("expected completions install subcommand"),
+            },
+            _ => panic!("expected completions install command"),
+        }
+    }
+
+    #[test]
+    fn parses_completions_install_with_shell_and_activate() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "completions",
+            "install",
+            "--shell",
+            "zsh",
+            "--activate",
+        ]);
+
+        match cli.command {
+            Some(Commands::Completions(command)) => match command.action {
+                Some(CompletionsAction::Install(args)) => {
+                    assert_eq!(args.shell, ManagedShellSelection::Zsh);
+                    assert!(args.activate);
+                }
+                _ => panic!("expected completions install subcommand"),
+            },
+            _ => panic!("expected completions install command"),
+        }
+    }
+
+    #[test]
+    fn parses_completions_status() {
+        let cli = Cli::parse_from(["cc-switch", "completions", "status"]);
+
+        match cli.command {
+            Some(Commands::Completions(command)) => match command.action {
+                Some(CompletionsAction::Status(CompletionLifecycleCommand { shell })) => {
+                    assert_eq!(shell, ManagedShellSelection::Auto);
+                }
+                _ => panic!("expected completions status subcommand"),
+            },
+            _ => panic!("expected completions status command"),
+        }
+    }
+
+    #[test]
+    fn parses_completions_uninstall_with_explicit_shell() {
+        let cli = Cli::parse_from(["cc-switch", "completions", "uninstall", "--shell", "bash"]);
+
+        match cli.command {
+            Some(Commands::Completions(command)) => match command.action {
+                Some(CompletionsAction::Uninstall(CompletionLifecycleCommand { shell })) => {
+                    assert_eq!(shell, ManagedShellSelection::Bash);
+                }
+                _ => panic!("expected completions uninstall subcommand"),
+            },
+            _ => panic!("expected completions uninstall command"),
+        }
+    }
+
+    #[test]
+    fn rejects_completions_generator_with_activate_flag() {
+        let err = match Cli::try_parse_from(["cc-switch", "completions", "bash", "--activate"]) {
+            Ok(_) => panic!("generator path should reject lifecycle-only flags"),
+            Err(err) => err,
+        };
+        let rendered = err.to_string();
+
+        assert!(rendered.contains("--activate"));
+        assert!(rendered.contains("unexpected argument"));
     }
 }
