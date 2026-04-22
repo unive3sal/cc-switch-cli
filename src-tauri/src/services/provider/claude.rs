@@ -28,7 +28,7 @@ impl ProviderService {
     }
 
     /// 归一化 Claude 模型键：读旧键(ANTHROPIC_SMALL_FAST_MODEL)，写新键(DEFAULT_*), 并删除旧键
-    pub(super) fn normalize_claude_models_in_value(settings: &mut Value) -> bool {
+    pub(crate) fn normalize_claude_models_in_value(settings: &mut Value) -> bool {
         let mut changed = false;
         let env = match settings.get_mut("env") {
             Some(v) if v.is_object() => v.as_object_mut().unwrap(),
@@ -226,29 +226,19 @@ impl ProviderService {
     pub(super) fn write_claude_live(
         provider: &Provider,
         common_config_snippet: Option<&str>,
+        apply_common_config: bool,
     ) -> Result<(), AppError> {
         if !crate::sync_policy::should_sync_live(&AppType::Claude) {
             return Ok(());
         }
 
         let settings_path = get_claude_settings_path();
-        let mut provider_content = provider.settings_config.clone();
-        let _ = Self::normalize_claude_models_in_value(&mut provider_content);
-
-        let content_to_write = if let Some(snippet) = common_config_snippet {
-            let snippet = snippet.trim();
-            if snippet.is_empty() {
-                provider_content
-            } else {
-                let common = Self::parse_common_claude_config_snippet(snippet)?;
-                let mut merged = common;
-                merge_json_values(&mut merged, &provider_content);
-                let _ = Self::normalize_claude_models_in_value(&mut merged);
-                merged
-            }
-        } else {
-            provider_content
-        };
+        let content_to_write = Self::build_effective_live_snapshot(
+            &AppType::Claude,
+            provider,
+            common_config_snippet,
+            apply_common_config,
+        )?;
 
         write_json_file(&settings_path, &content_to_write)?;
         Ok(())
