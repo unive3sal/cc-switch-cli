@@ -42,6 +42,24 @@ pub(super) fn provider_rows_filtered<'a>(app: &App, data: &'a UiData) -> Vec<&'a
         .collect()
 }
 
+fn provider_name_with_quota_line(
+    app: &App,
+    data: &UiData,
+    row: &ProviderRow,
+    show_quota: bool,
+    theme: &super::theme::Theme,
+) -> Line<'static> {
+    let mut spans = vec![Span::raw(data::provider_display_name(&app.app_type, row))];
+    if show_quota {
+        if let Some(quota) = quota_compact_line(data.quota.state_for(&row.id), theme, true) {
+            spans.push(Span::styled("  (", Style::default().fg(theme.comment)));
+            spans.extend(quota.spans);
+            spans.push(Span::styled(")", Style::default().fg(theme.comment)));
+        }
+    }
+    Line::from(spans)
+}
+
 pub(super) fn render_providers(
     frame: &mut Frame<'_>,
     app: &App,
@@ -66,6 +84,9 @@ pub(super) fn render_providers(
         .split(inner);
 
     let visible = provider_rows_filtered(app, data);
+    let selected_supports_quota = visible
+        .get(app.provider_idx)
+        .is_some_and(|row| data::quota_target_for_provider(&app.app_type, row).is_some());
 
     if app.focus == Focus::Content {
         let mut keys = vec![("Enter", texts::tui_key_details())];
@@ -81,6 +102,9 @@ pub(super) fn render_providers(
             ]);
             if let Some(row) = visible.get(app.provider_idx) {
                 keys.push(("e", texts::tui_key_edit()));
+                if selected_supports_quota {
+                    keys.push(("r", texts::tui_key_refresh()));
+                }
                 if matches!(app.app_type, crate::app_config::AppType::OpenClaw) && row.is_in_config
                 {
                     keys.push(("x", texts::tui_key_set_default()));
@@ -95,8 +119,11 @@ pub(super) fn render_providers(
                 ("a", texts::tui_key_add()),
                 ("e", texts::tui_key_edit()),
                 ("d", texts::tui_key_delete()),
-                ("t", texts::tui_key_speedtest()),
             ]);
+            if selected_supports_quota {
+                keys.push(("r", texts::tui_key_refresh()));
+            }
+            keys.push(("t", texts::tui_key_speedtest()));
             if crate::cli::tui::app::supports_temporary_provider_launch(&app.app_type) {
                 keys.push(("o", texts::tui_key_launch_temp()));
             }
@@ -112,7 +139,7 @@ pub(super) fn render_providers(
     ])
     .style(header_style);
 
-    let rows = visible.iter().map(|row| {
+    let rows = visible.iter().enumerate().map(|(idx, row)| {
         let marker = if matches!(app.app_type, crate::app_config::AppType::OpenClaw) {
             if row.is_default_model {
                 "*"
@@ -133,26 +160,28 @@ pub(super) fn render_providers(
             texts::tui_marker_inactive()
         };
         let api = row.api_url.as_deref().unwrap_or(texts::tui_na());
+        let show_quota = row.is_current || idx == app.provider_idx;
         Row::new(vec![
             Cell::from(marker),
-            Cell::from(data::provider_display_name(&app.app_type, row)),
+            Cell::from(provider_name_with_quota_line(
+                app, data, row, show_quota, theme,
+            )),
             Cell::from(api),
         ])
     });
 
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(2),
-            Constraint::Percentage(45),
-            Constraint::Percentage(55),
-        ],
-    )
-    .header(header)
-    .style(table_style)
-    .block(Block::default().borders(Borders::NONE))
-    .row_highlight_style(selection_style(theme))
-    .highlight_symbol(highlight_symbol(theme));
+    let constraints = vec![
+        Constraint::Length(2),
+        Constraint::Percentage(48),
+        Constraint::Percentage(52),
+    ];
+
+    let table = Table::new(rows, constraints)
+        .header(header)
+        .style(table_style)
+        .block(Block::default().borders(Borders::NONE))
+        .row_highlight_style(selection_style(theme))
+        .highlight_symbol(highlight_symbol(theme));
 
     let mut state = TableState::default();
     state.select(Some(app.provider_idx));
@@ -203,16 +232,16 @@ pub(super) fn render_provider_detail(
             let keys = vec![
                 ("s", texts::tui_key_add_remove()),
                 ("e", texts::tui_key_edit()),
-                ("t", texts::tui_key_speedtest()),
             ];
             keys
         } else {
-            vec![
-                ("s", texts::tui_key_switch()),
-                ("e", texts::tui_key_edit()),
-                ("t", texts::tui_key_speedtest()),
-            ]
+            let keys = vec![("s", texts::tui_key_switch()), ("e", texts::tui_key_edit())];
+            keys
         };
+        if data::quota_target_for_provider(&app.app_type, row).is_some() {
+            keys.push(("r", texts::tui_key_refresh()));
+        }
+        keys.push(("t", texts::tui_key_speedtest()));
         if matches!(app.app_type, crate::app_config::AppType::OpenClaw) && row.is_in_config {
             keys.push(("x", texts::tui_key_set_default()));
         } else if matches!(app.app_type, crate::app_config::AppType::OpenCode) {
@@ -343,6 +372,8 @@ pub(super) fn render_provider_detail(
         }
     }
 
+    lines.extend(quota_detail_lines(app, data, row, theme));
+
     frame.render_widget(
         Paragraph::new(lines)
             .block(Block::default().borders(Borders::NONE))
@@ -355,7 +386,10 @@ pub(super) fn render_provider_detail(
 mod tests {
     use super::*;
     use crate::app_config::AppType;
+    use crate::provider::Provider;
+    use crate::services::{CredentialStatus, QuotaTier, SubscriptionQuota};
     use ratatui::buffer::Buffer;
+    use serde_json::json;
 
     fn all_text(buf: &Buffer) -> String {
         let mut all = String::new();
@@ -366,6 +400,57 @@ mod tests {
             all.push('\n');
         }
         all
+    }
+
+    fn current_official_claude_data() -> UiData {
+        let mut data = super::super::tests::minimal_data(&AppType::Claude);
+        let mut provider = Provider::with_id(
+            "official".to_string(),
+            "Claude Official".to_string(),
+            json!({"env": {}}),
+            None,
+        );
+        provider.category = Some("official".to_string());
+        data.providers.current_id = "official".to_string();
+        data.providers.rows = vec![ProviderRow {
+            id: "official".to_string(),
+            provider,
+            api_url: None,
+            is_current: true,
+            is_in_config: true,
+            is_saved: true,
+            is_default_model: false,
+            primary_model_id: None,
+            default_model_id: None,
+        }];
+
+        let target =
+            data::quota_target_for_provider(&AppType::Claude, &data.providers.rows[0]).unwrap();
+        data.quota.finish(
+            target,
+            SubscriptionQuota {
+                tool: "claude".to_string(),
+                credential_status: CredentialStatus::Valid,
+                credential_message: None,
+                success: true,
+                tiers: vec![
+                    QuotaTier {
+                        name: "five_hour".to_string(),
+                        utilization: 42.0,
+                        resets_at: None,
+                    },
+                    QuotaTier {
+                        name: "seven_day".to_string(),
+                        utilization: 70.0,
+                        resets_at: None,
+                    },
+                ],
+                extra_usage: None,
+                error: None,
+                queried_at: Some(chrono::Utc::now().timestamp_millis()),
+            },
+        );
+        data
     }
 
     #[test]
@@ -442,6 +527,91 @@ mod tests {
             all.contains(&format!("o {}", texts::tui_key_launch_temp())),
             "{all}"
         );
+    }
+
+    #[test]
+    fn official_provider_list_shows_inline_quota_and_refresh_hint() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        let data = current_official_claude_data();
+        let all = all_text(&super::super::tests::render(&app, &data));
+
+        assert!(!all.contains(texts::tui_header_quota()), "{all}");
+        assert!(
+            all.contains(&format!("r {}", texts::tui_key_refresh())),
+            "{all}"
+        );
+        assert!(all.contains("Claude Official"), "{all}");
+        assert!(all.contains("5h 42%"), "{all}");
+        assert!(all.contains("s ago"), "{all}");
+    }
+
+    #[test]
+    fn provider_list_shows_selected_non_current_quota_result() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::Providers;
+        app.focus = Focus::Content;
+        app.provider_idx = 1;
+        let mut data = current_official_claude_data();
+        data.providers.current_id = "custom".to_string();
+        data.providers.rows[0].is_current = false;
+        data.providers.rows.insert(
+            0,
+            ProviderRow {
+                id: "custom".to_string(),
+                provider: Provider::with_id(
+                    "custom".to_string(),
+                    "Custom".to_string(),
+                    json!({"env": {"ANTHROPIC_BASE_URL": "https://api.example.com"}}),
+                    None,
+                ),
+                api_url: Some("https://api.example.com".to_string()),
+                is_current: true,
+                is_in_config: true,
+                is_saved: true,
+                is_default_model: false,
+                primary_model_id: None,
+                default_model_id: None,
+            },
+        );
+        let all = all_text(&super::super::tests::render(&app, &data));
+
+        assert!(
+            all.contains(&format!("r {}", texts::tui_key_refresh())),
+            "{all}"
+        );
+        assert!(!all.contains(texts::tui_header_quota()), "{all}");
+        assert!(all.contains("5h 42%"), "{all}");
+        assert!(all.contains("s ago"), "{all}");
+    }
+
+    #[test]
+    fn official_provider_detail_shows_quota_details() {
+        let _lock = super::super::tests::lock_env();
+        let _no_color = super::super::tests::EnvGuard::remove("NO_COLOR");
+
+        let mut app = App::new(Some(AppType::Claude));
+        app.route = Route::ProviderDetail {
+            id: "official".to_string(),
+        };
+        app.focus = Focus::Content;
+        let data = current_official_claude_data();
+        let all = all_text(&super::super::tests::render(&app, &data));
+
+        assert!(all.contains(texts::tui_label_quota()), "{all}");
+        assert!(
+            all.contains(&format!("r {}", texts::tui_key_refresh())),
+            "{all}"
+        );
+        assert!(all.contains("5h: 42%"), "{all}");
+        assert!(all.contains("7d: 70%"), "{all}");
     }
 
     #[cfg(not(unix))]

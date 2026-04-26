@@ -489,6 +489,7 @@ pub(super) fn minimal_data(_app_type: &AppType) -> UiData {
         config: ConfigSnapshot::default(),
         skills: SkillsSnapshot::default(),
         proxy: ProxySnapshot::default(),
+        quota: Default::default(),
     }
 }
 

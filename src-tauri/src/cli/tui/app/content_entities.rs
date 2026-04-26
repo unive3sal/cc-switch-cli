@@ -142,6 +142,16 @@ impl App {
                 };
                 Action::ProviderStreamCheck { id: row.id.clone() }
             }
+            KeyCode::Char('r') => {
+                let Some(row) = visible.get(self.provider_idx) else {
+                    return Action::None;
+                };
+                if data::quota_target_for_provider(&self.app_type, row).is_none() {
+                    self.push_toast(texts::tui_toast_quota_not_available(), ToastKind::Info);
+                    return Action::None;
+                }
+                Action::ProviderQuotaRefresh { id: row.id.clone() }
+            }
             _ => Action::None,
         }
     }
@@ -236,6 +246,13 @@ impl App {
                     provider_name: super::data::provider_display_name(&self.app_type, row),
                 };
                 Action::ProviderStreamCheck { id: row.id.clone() }
+            }
+            KeyCode::Char('r') => {
+                if data::quota_target_for_provider(&self.app_type, row).is_none() {
+                    self.push_toast(texts::tui_toast_quota_not_available(), ToastKind::Info);
+                    return Action::None;
+                }
+                Action::ProviderQuotaRefresh { id: row.id.clone() }
             }
             _ => Action::None,
         }

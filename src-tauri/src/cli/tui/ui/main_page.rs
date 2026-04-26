@@ -93,7 +93,15 @@ pub(super) fn render_main(
         .last_error
         .clone()
         .unwrap_or_else(|| texts::none().to_string());
-    let connection_lines = vec![
+    let current_quota_line = data
+        .providers
+        .rows
+        .iter()
+        .find(|row| row.is_current)
+        .filter(|row| data::quota_target_for_provider(&app.app_type, row).is_some())
+        .and_then(|row| quota_compact_line(data.quota.state_for(&row.id), theme, true));
+
+    let mut connection_lines = vec![
         kv_line(
             theme,
             texts::provider_label(),
@@ -146,6 +154,14 @@ pub(super) fn render_main(
             vec![Span::styled(api_url, value_style)],
         ),
     ];
+    if let Some(quota) = current_quota_line {
+        connection_lines.push(kv_line(
+            theme,
+            texts::tui_label_quota(),
+            label_width,
+            quota.spans,
+        ));
+    }
 
     let webdav = data.config.webdav_sync.as_ref();
     let is_config_value_set = |value: &str| !value.trim().is_empty();
@@ -238,6 +254,7 @@ pub(super) fn render_main(
     let inner = block.inner(area);
     let content = inset_left(inner, CONTENT_INSET_LEFT);
     let bottom_hero_height = if current_app_routed { 11 } else { 7 };
+    let connection_card_height = (connection_lines.len() as u16 + 2).max(4);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(bottom_hero_height)])
@@ -247,7 +264,7 @@ pub(super) fn render_main(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),
-            Constraint::Length(4),
+            Constraint::Length(connection_card_height),
             Constraint::Length(4),
             Constraint::Length(6),
             Constraint::Min(0),
