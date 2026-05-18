@@ -48,7 +48,7 @@ const DB_BACKUP_RETAIN: usize = 10;
 
 /// 当前 Schema 版本号
 /// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
-pub(crate) const SCHEMA_VERSION: i32 = 10;
+pub(crate) const SCHEMA_VERSION: i32 = 11;
 
 /// 安全地序列化 JSON，避免 unwrap panic
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {
@@ -93,6 +93,12 @@ impl Database {
 
         // 启用外键约束
         conn.execute("PRAGMA foreign_keys = ON;", [])
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        // 多进程并发：daemon 与 worker 都会打开这个文件，WAL + busy_timeout 让
+        // 短暂的 SQLITE_BUSY 自动重试而不是直接失败。
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let db = Self {

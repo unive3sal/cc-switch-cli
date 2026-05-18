@@ -495,6 +495,7 @@ dependencies = [
  "log",
  "minisign",
  "minisign-verify",
+ "nix",
  "once_cell",
  "ratatui",
  "regex",

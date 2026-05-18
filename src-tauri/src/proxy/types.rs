@@ -98,6 +98,18 @@ pub struct ProxyStatus {
     /// 当前活跃的代理目标列表
     #[serde(default)]
     pub active_targets: Vec<ActiveTarget>,
+    /// 当前活跃的 daemon-managed worker 列表
+    #[serde(default)]
+    pub active_workers: Vec<ActiveWorker>,
+}
+
+/// 活跃的 daemon-managed worker 信息
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActiveWorker {
+    pub app_type: String,
+    pub address: String,
+    pub port: u16,
+    pub pid: Option<u32>,
 }
 
 /// 活跃的代理目标信息
@@ -179,6 +191,9 @@ pub struct AppProxyConfig {
     pub app_type: String,
     /// 该 app 代理启用开关
     pub enabled: bool,
+    /// 该 app 监听端口
+    #[serde(default = "default_app_listen_port")]
+    pub listen_port: u16,
     /// 该 app 自动故障转移开关
     pub auto_failover_enabled: bool,
     /// 最大重试次数
@@ -199,6 +214,10 @@ pub struct AppProxyConfig {
     pub circuit_error_rate_threshold: f64,
     /// 计算错误率的最小请求数
     pub circuit_min_requests: u32,
+}
+
+fn default_app_listen_port() -> u16 {
+    15721
 }
 
 /// 整流器配置

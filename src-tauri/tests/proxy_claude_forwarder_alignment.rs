@@ -43,6 +43,14 @@ async fn bind_test_listener() -> tokio::net::TcpListener {
     );
 }
 
+fn free_loopback_port() -> u16 {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
+    listener
+        .local_addr()
+        .expect("read ephemeral address")
+        .port()
+}
+
 #[derive(Clone, Default)]
 struct CountingUpstreamState {
     attempts: Arc<AtomicUsize>,
@@ -555,6 +563,7 @@ async fn proxy_claude_auto_failover_uses_activated_queue_providers() {
         .await
         .expect("read claude app proxy config");
     app_proxy.enabled = true;
+    app_proxy.listen_port = free_loopback_port();
     app_proxy.auto_failover_enabled = true;
     db.update_proxy_config_for_app(app_proxy)
         .await

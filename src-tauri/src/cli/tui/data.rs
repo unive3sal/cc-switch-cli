@@ -1025,11 +1025,13 @@ fn load_proxy_snapshot(app_type: &AppType) -> Result<ProxySnapshot, AppError> {
         } else {
             runtime_status.address.clone()
         };
-        let listen_port = if runtime_status.port == 0 {
-            config.listen_port
-        } else {
-            runtime_status.port
-        };
+        let listen_port = runtime_status
+            .active_workers
+            .iter()
+            .find(|worker| worker.app_type == current_app)
+            .map(|worker| worker.port)
+            .or_else(|| (runtime_status.port != 0).then_some(runtime_status.port))
+            .unwrap_or(app_proxy_config.listen_port);
         let default_cost_multiplier = state
             .db
             .get_default_cost_multiplier(app_type.as_str())
@@ -1041,14 +1043,15 @@ fn load_proxy_snapshot(app_type: &AppType) -> Result<ProxySnapshot, AppError> {
         Ok(ProxySnapshot {
             enabled: config.proxy_enabled,
             running: runtime_status.running,
-            managed_runtime: runtime_status.managed_session_token.is_some(),
+            managed_runtime: runtime_status.managed_session_token.is_some()
+                || !runtime_status.active_workers.is_empty(),
             auto_failover_enabled: app_proxy_config.auto_failover_enabled,
             claude_takeover: takeover.claude,
             codex_takeover: takeover.codex,
             gemini_takeover: takeover.gemini,
             default_cost_multiplier,
             configured_listen_address: config.listen_address.clone(),
-            configured_listen_port: config.listen_port,
+            configured_listen_port: app_proxy_config.listen_port,
             listen_address,
             listen_port,
             uptime_seconds: runtime_status.uptime_seconds,

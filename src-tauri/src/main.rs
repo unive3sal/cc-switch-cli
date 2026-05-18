@@ -37,12 +37,14 @@ fn run(cli: Cli) -> Result<(), AppError> {
         }
         Some(Commands::Skills(cmd)) => cc_switch_lib::cli::commands::skills::execute(cmd, cli.app),
         Some(Commands::Config(cmd)) => cc_switch_lib::cli::commands::config::execute(cmd, cli.app),
-        Some(Commands::Proxy(cmd)) => cc_switch_lib::cli::commands::proxy::execute(cmd),
+        Some(Commands::Proxy(cmd)) => cc_switch_lib::cli::commands::proxy::execute(cmd, cli.app),
         Some(Commands::Failover(cmd)) => {
             cc_switch_lib::cli::commands::failover::execute(cmd, cli.app)
         }
         #[cfg(unix)]
         Some(Commands::Start(cmd)) => cc_switch_lib::cli::commands::start::execute(cmd),
+        #[cfg(unix)]
+        Some(Commands::Daemon(cmd)) => cc_switch_lib::cli::commands::daemon::execute(cmd),
         Some(Commands::Env(cmd)) => cc_switch_lib::cli::commands::env::execute(cmd, cli.app),
         Some(Commands::Update(cmd)) => cc_switch_lib::cli::commands::update::execute(cmd),
         Some(Commands::Completions(cmd)) => cc_switch_lib::cli::commands::completions::execute(cmd),
@@ -55,6 +57,8 @@ fn command_requires_startup_state(command: &Option<Commands>) -> bool {
         Some(Commands::Completions(_))
         | Some(Commands::Update(_))
         | Some(Commands::Internal(_)) => false,
+        #[cfg(unix)]
+        Some(Commands::Daemon(_)) => false,
         _ => true,
     }
 }
