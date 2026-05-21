@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// 代理服务器配置
@@ -191,9 +193,6 @@ pub struct AppProxyConfig {
     pub app_type: String,
     /// 该 app 代理启用开关
     pub enabled: bool,
-    /// 该 app 监听端口
-    #[serde(default = "default_app_listen_port")]
-    pub listen_port: u16,
     /// 该 app 自动故障转移开关
     pub auto_failover_enabled: bool,
     /// 最大重试次数
@@ -216,8 +215,18 @@ pub struct AppProxyConfig {
     pub circuit_min_requests: u32,
 }
 
-fn default_app_listen_port() -> u16 {
-    15721
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyPreferences {
+    #[serde(default)]
+    pub apps: BTreeMap<String, AppProxyPreference>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AppProxyPreference {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preferred_port: Option<u16>,
 }
 
 /// 整流器配置

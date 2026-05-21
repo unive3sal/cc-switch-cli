@@ -69,10 +69,9 @@ pub(super) fn set_proxy_listen_port(
         return Ok(());
     }
 
-    let mut app_config =
-        runtime.block_on(state.db.get_proxy_config_for_app(ctx.app.app_type.as_str()))?;
-    app_config.listen_port = port;
-    runtime.block_on(state.db.update_proxy_config_for_app(app_config))?;
+    state
+        .db
+        .set_app_proxy_preferred_port(ctx.app.app_type.as_str(), port)?;
 
     *ctx.data = UiData::load(&ctx.app.app_type)?;
     ctx.app.push_toast(

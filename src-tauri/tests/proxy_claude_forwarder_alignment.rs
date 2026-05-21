@@ -563,11 +563,12 @@ async fn proxy_claude_auto_failover_uses_activated_queue_providers() {
         .await
         .expect("read claude app proxy config");
     app_proxy.enabled = true;
-    app_proxy.listen_port = free_loopback_port();
     app_proxy.auto_failover_enabled = true;
     db.update_proxy_config_for_app(app_proxy)
         .await
         .expect("enable auto failover");
+    db.set_app_proxy_preferred_port("claude", free_loopback_port())
+        .expect("set claude preferred proxy port");
 
     let service = ProxyService::new(db.clone());
     let mut config = service.get_config().await.expect("read proxy config");

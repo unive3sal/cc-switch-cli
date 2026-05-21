@@ -9,7 +9,9 @@ use rust_decimal::Decimal;
 
 use super::super::{lock_conn, Database};
 
-fn default_app_listen_port(app_type: &str) -> u16 {
+pub(crate) const PROXY_PREFERENCES_KEY: &str = "proxy_preferences_cli_only";
+
+fn default_app_preferred_port(app_type: &str) -> u16 {
     match app_type {
         "claude" => 15721,
         "codex" => 15722,
@@ -94,11 +96,13 @@ impl Database {
             "UPDATE proxy_config SET
                 proxy_enabled = ?1,
                 listen_address = ?2,
-                enable_logging = ?3,
+                listen_port = ?3,
+                enable_logging = ?4,
                 updated_at = datetime('now')",
             rusqlite::params![
                 if config.proxy_enabled { 1 } else { 0 },
                 config.listen_address,
+                config.listen_port as i32,
                 if config.enable_logging { 1 } else { 0 },
             ],
         )
@@ -259,7 +263,7 @@ impl Database {
         let result = {
             let conn = lock_conn!(self.conn);
             conn.query_row(
-                "SELECT app_type, enabled, listen_port, auto_failover_enabled,
+                "SELECT app_type, enabled, auto_failover_enabled,
                         max_retries, streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
                         circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                         circuit_error_rate_threshold, circuit_min_requests
@@ -269,17 +273,16 @@ impl Database {
                     Ok(AppProxyConfig {
                         app_type: row.get(0)?,
                         enabled: row.get::<_, i32>(1)? != 0,
-                        listen_port: row.get::<_, i32>(2)? as u16,
-                        auto_failover_enabled: row.get::<_, i32>(3)? != 0,
-                        max_retries: row.get::<_, i32>(4)? as u32,
-                        streaming_first_byte_timeout: row.get::<_, i32>(5)? as u32,
-                        streaming_idle_timeout: row.get::<_, i32>(6)? as u32,
-                        non_streaming_timeout: row.get::<_, i32>(7)? as u32,
-                        circuit_failure_threshold: row.get::<_, i32>(8)? as u32,
-                        circuit_success_threshold: row.get::<_, i32>(9)? as u32,
-                        circuit_timeout_seconds: row.get::<_, i32>(10)? as u32,
-                        circuit_error_rate_threshold: row.get(11)?,
-                        circuit_min_requests: row.get::<_, i32>(12)? as u32,
+                        auto_failover_enabled: row.get::<_, i32>(2)? != 0,
+                        max_retries: row.get::<_, i32>(3)? as u32,
+                        streaming_first_byte_timeout: row.get::<_, i32>(4)? as u32,
+                        streaming_idle_timeout: row.get::<_, i32>(5)? as u32,
+                        non_streaming_timeout: row.get::<_, i32>(6)? as u32,
+                        circuit_failure_threshold: row.get::<_, i32>(7)? as u32,
+                        circuit_success_threshold: row.get::<_, i32>(8)? as u32,
+                        circuit_timeout_seconds: row.get::<_, i32>(9)? as u32,
+                        circuit_error_rate_threshold: row.get(10)?,
+                        circuit_min_requests: row.get::<_, i32>(11)? as u32,
                     })
                 },
             )
@@ -294,7 +297,6 @@ impl Database {
                 Ok(AppProxyConfig {
                     app_type: app_type_owned,
                     enabled: false,
-                    listen_port: default_app_listen_port(app_type),
                     auto_failover_enabled: false,
                     max_retries: 3,
                     streaming_first_byte_timeout: 60,
@@ -327,23 +329,21 @@ impl Database {
         conn.execute(
             "UPDATE proxy_config SET
                 enabled = ?2,
-                listen_port = ?3,
-                auto_failover_enabled = ?4,
-                max_retries = ?5,
-                streaming_first_byte_timeout = ?6,
-                streaming_idle_timeout = ?7,
-                non_streaming_timeout = ?8,
-                circuit_failure_threshold = ?9,
-                circuit_success_threshold = ?10,
-                circuit_timeout_seconds = ?11,
-                circuit_error_rate_threshold = ?12,
-                circuit_min_requests = ?13,
+                auto_failover_enabled = ?3,
+                max_retries = ?4,
+                streaming_first_byte_timeout = ?5,
+                streaming_idle_timeout = ?6,
+                non_streaming_timeout = ?7,
+                circuit_failure_threshold = ?8,
+                circuit_success_threshold = ?9,
+                circuit_timeout_seconds = ?10,
+                circuit_error_rate_threshold = ?11,
+                circuit_min_requests = ?12,
                 updated_at = datetime('now')
              WHERE app_type = ?1",
             rusqlite::params![
                 config.app_type,
                 if config.enabled { 1 } else { 0 },
-                config.listen_port as i32,
                 if auto_failover_enabled { 1 } else { 0 },
                 config.max_retries as i32,
                 config.streaming_first_byte_timeout as i32,
@@ -371,33 +371,23 @@ impl Database {
             .map_err(|e| AppError::Lock(e.to_string()))?;
 
         // 根据 app_type 使用不同的默认值（与 schema.rs seed 保持一致）
-        let (
-            retries,
-            fb_timeout,
-            idle_timeout,
-            cb_fail,
-            cb_succ,
-            cb_timeout,
-            cb_rate,
-            cb_min,
-            listen_port,
-        ) = match app_type {
-            "claude" => (6, 90, 180, 8, 3, 90, 0.7, 15, 15721),
-            "codex" => (3, 60, 120, 4, 2, 60, 0.6, 10, 15722),
-            "gemini" => (5, 60, 120, 4, 2, 60, 0.6, 10, 15723),
-            _ => (3, 60, 120, 4, 2, 60, 0.6, 10, 15721),
-        };
+        let (retries, fb_timeout, idle_timeout, cb_fail, cb_succ, cb_timeout, cb_rate, cb_min) =
+            match app_type {
+                "claude" => (6, 90, 180, 8, 3, 90, 0.7, 15),
+                "codex" => (3, 60, 120, 4, 2, 60, 0.6, 10),
+                "gemini" => (5, 60, 120, 4, 2, 60, 0.6, 10),
+                _ => (3, 60, 120, 4, 2, 60, 0.6, 10), // 默认值
+            };
 
         conn.execute(
             "INSERT OR IGNORE INTO proxy_config (
-                app_type, listen_port, max_retries,
+                app_type, max_retries,
                 streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
                 circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                 circuit_error_rate_threshold, circuit_min_requests
-            ) VALUES (?1, ?2, ?3, ?4, ?5, 600, ?6, ?7, ?8, ?9, ?10)",
+            ) VALUES (?1, ?2, ?3, ?4, 600, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 app_type,
-                listen_port,
                 retries,
                 fb_timeout,
                 idle_timeout,
@@ -423,11 +413,11 @@ impl Database {
         // claude: 更激进的重试和超时配置
         conn.execute(
             "INSERT OR IGNORE INTO proxy_config (
-                app_type, listen_port, max_retries,
+                app_type, max_retries,
                 streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
                 circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                 circuit_error_rate_threshold, circuit_min_requests
-            ) VALUES ('claude', 15721, 6, 90, 180, 600, 8, 3, 90, 0.7, 15)",
+            ) VALUES ('claude', 6, 90, 180, 600, 8, 3, 90, 0.7, 15)",
             [],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
@@ -435,11 +425,11 @@ impl Database {
         // codex: 默认配置
         conn.execute(
             "INSERT OR IGNORE INTO proxy_config (
-                app_type, listen_port, max_retries,
+                app_type, max_retries,
                 streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
                 circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                 circuit_error_rate_threshold, circuit_min_requests
-            ) VALUES ('codex', 15722, 3, 60, 120, 600, 4, 2, 60, 0.6, 10)",
+            ) VALUES ('codex', 3, 60, 120, 600, 4, 2, 60, 0.6, 10)",
             [],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
@@ -447,11 +437,11 @@ impl Database {
         // gemini: 稍高的重试次数
         conn.execute(
             "INSERT OR IGNORE INTO proxy_config (
-                app_type, listen_port, max_retries,
+                app_type, max_retries,
                 streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
                 circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                 circuit_error_rate_threshold, circuit_min_requests
-            ) VALUES ('gemini', 15723, 5, 60, 120, 600, 4, 2, 60, 0.6, 10)",
+            ) VALUES ('gemini', 5, 60, 120, 600, 4, 2, 60, 0.6, 10)",
             [],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
@@ -508,14 +498,16 @@ impl Database {
         conn.execute(
             "UPDATE proxy_config SET
                 listen_address = ?1,
-                max_retries = ?2,
-                enable_logging = ?3,
-                streaming_first_byte_timeout = ?4,
-                streaming_idle_timeout = ?5,
-                non_streaming_timeout = ?6,
+                listen_port = ?2,
+                max_retries = ?3,
+                enable_logging = ?4,
+                streaming_first_byte_timeout = ?5,
+                streaming_idle_timeout = ?6,
+                non_streaming_timeout = ?7,
                 updated_at = datetime('now')",
             rusqlite::params![
                 config.listen_address,
+                config.listen_port as i32,
                 config.max_retries as i32,
                 if config.enable_logging { 1 } else { 0 },
                 config.streaming_first_byte_timeout as i32,
@@ -526,6 +518,42 @@ impl Database {
         .map_err(|e| AppError::Database(e.to_string()))?;
 
         Ok(())
+    }
+
+    pub fn get_proxy_preferences(&self) -> Result<ProxyPreferences, AppError> {
+        let Some(raw) = self.get_setting(PROXY_PREFERENCES_KEY)? else {
+            return Ok(ProxyPreferences::default());
+        };
+        serde_json::from_str(&raw).map_err(|error| AppError::Json {
+            path: PROXY_PREFERENCES_KEY.to_string(),
+            source: error,
+        })
+    }
+
+    pub fn update_proxy_preferences(&self, preferences: &ProxyPreferences) -> Result<(), AppError> {
+        if preferences.apps.is_empty() {
+            self.delete_setting(PROXY_PREFERENCES_KEY)?;
+            return Ok(());
+        }
+        let serialized = serde_json::to_string(preferences)
+            .map_err(|source| AppError::JsonSerialize { source })?;
+        self.set_setting(PROXY_PREFERENCES_KEY, &serialized)
+    }
+
+    pub fn get_app_proxy_preferred_port(&self, app_type: &str) -> Result<u16, AppError> {
+        Ok(self
+            .get_proxy_preferences()?
+            .apps
+            .get(app_type)
+            .and_then(|preference| preference.preferred_port)
+            .unwrap_or_else(|| default_app_preferred_port(app_type)))
+    }
+
+    pub fn set_app_proxy_preferred_port(&self, app_type: &str, port: u16) -> Result<(), AppError> {
+        let mut preferences = self.get_proxy_preferences()?;
+        let entry = preferences.apps.entry(app_type.to_string()).or_default();
+        entry.preferred_port = Some(port);
+        self.update_proxy_preferences(&preferences)
     }
 
     /// 设置 Live 接管状态（兼容旧版本，更新 enabled 字段）
@@ -932,6 +960,7 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
+    use crate::database::dao::proxy::PROXY_PREFERENCES_KEY;
     use crate::database::Database;
     use crate::error::AppError;
     use crate::provider::Provider;
@@ -1050,83 +1079,27 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn update_global_proxy_config_preserves_app_listen_ports() -> Result<(), AppError> {
-        let db = Database::memory()?;
-        let mut codex = db.get_proxy_config_for_app("codex").await?;
-        codex.listen_port = 17022;
-        db.update_proxy_config_for_app(codex).await?;
-        let mut gemini = db.get_proxy_config_for_app("gemini").await?;
-        gemini.listen_port = 17023;
-        db.update_proxy_config_for_app(gemini).await?;
-
-        let mut config = db.get_global_proxy_config().await?;
-        config.proxy_enabled = true;
-        config.listen_address = "127.0.0.2".to_string();
-        config.listen_port = 18000;
-        db.update_global_proxy_config(config).await?;
-
-        assert_eq!(
-            db.get_proxy_config_for_app("claude").await?.listen_port,
-            15721
-        );
-        assert_eq!(
-            db.get_proxy_config_for_app("codex").await?.listen_port,
-            17022
-        );
-        assert_eq!(
-            db.get_proxy_config_for_app("gemini").await?.listen_port,
-            17023
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn update_proxy_config_preserves_app_listen_ports() -> Result<(), AppError> {
-        let db = Database::memory()?;
-        let mut codex = db.get_proxy_config_for_app("codex").await?;
-        codex.listen_port = 17022;
-        db.update_proxy_config_for_app(codex).await?;
-        let mut gemini = db.get_proxy_config_for_app("gemini").await?;
-        gemini.listen_port = 17023;
-        db.update_proxy_config_for_app(gemini).await?;
-
-        let mut config = db.get_proxy_config().await?;
-        config.listen_address = "127.0.0.2".to_string();
-        config.listen_port = 18000;
-        db.update_proxy_config(config).await?;
-
-        assert_eq!(
-            db.get_proxy_config_for_app("claude").await?.listen_port,
-            15721
-        );
-        assert_eq!(
-            db.get_proxy_config_for_app("codex").await?.listen_port,
-            17022
-        );
-        assert_eq!(
-            db.get_proxy_config_for_app("gemini").await?.listen_port,
-            17023
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn app_proxy_config_uses_distinct_default_ports() -> Result<(), AppError> {
+    #[test]
+    fn proxy_preferences_persist_preferred_ports_in_settings_kv() -> Result<(), AppError> {
         let db = Database::memory()?;
 
+        db.set_app_proxy_preferred_port("codex", 17022)?;
+        db.set_app_proxy_preferred_port("gemini", 17023)?;
+
+        let raw = db
+            .get_setting(PROXY_PREFERENCES_KEY)?
+            .expect("proxy preferences should be stored in settings");
+        assert!(raw.contains("\"preferredPort\":17022"));
+
+        let preferences = db.get_proxy_preferences()?;
         assert_eq!(
-            db.get_proxy_config_for_app("claude").await?.listen_port,
-            15721
+            preferences
+                .apps
+                .get("codex")
+                .and_then(|preference| preference.preferred_port),
+            Some(17022)
         );
-        assert_eq!(
-            db.get_proxy_config_for_app("codex").await?.listen_port,
-            15722
-        );
-        assert_eq!(
-            db.get_proxy_config_for_app("gemini").await?.listen_port,
-            15723
-        );
+
         Ok(())
     }
 

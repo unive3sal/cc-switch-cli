@@ -136,29 +136,29 @@ impl Database {
         // - 旧表会在 apply_schema_migrations() 中迁移为三行结构后再插入。
         if Self::has_column(conn, "proxy_config", "app_type")? {
             conn.execute(
-                "INSERT OR IGNORE INTO proxy_config (app_type, listen_port, max_retries,
+                "INSERT OR IGNORE INTO proxy_config (app_type, max_retries,
                 streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
                 circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                 circuit_error_rate_threshold, circuit_min_requests)
-                VALUES ('claude', 15721, 6, 90, 180, 600, 8, 3, 90, 0.7, 15)",
+                VALUES ('claude', 6, 90, 180, 600, 8, 3, 90, 0.7, 15)",
                 [],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
             conn.execute(
-                "INSERT OR IGNORE INTO proxy_config (app_type, listen_port, max_retries,
+                "INSERT OR IGNORE INTO proxy_config (app_type, max_retries,
                 streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
                 circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                 circuit_error_rate_threshold, circuit_min_requests)
-                VALUES ('codex', 15722, 3, 60, 120, 600, 4, 2, 60, 0.6, 10)",
+                VALUES ('codex', 3, 60, 120, 600, 4, 2, 60, 0.6, 10)",
                 [],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
             conn.execute(
-                "INSERT OR IGNORE INTO proxy_config (app_type, listen_port, max_retries,
+                "INSERT OR IGNORE INTO proxy_config (app_type, max_retries,
                 streaming_first_byte_timeout, streaming_idle_timeout, non_streaming_timeout,
                 circuit_failure_threshold, circuit_success_threshold, circuit_timeout_seconds,
                 circuit_error_rate_threshold, circuit_min_requests)
-                VALUES ('gemini', 15723, 5, 60, 120, 600, 4, 2, 60, 0.6, 10)",
+                VALUES ('gemini', 5, 60, 120, 600, 4, 2, 60, 0.6, 10)",
                 [],
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
@@ -415,14 +415,9 @@ impl Database {
                         Self::set_user_version(conn, 9)?;
                     }
                     9 => {
-                        log::info!("迁移数据库从 v9 到 v10（Hermes Agent 支持）");
+                        log::info!("迁移数据库从 v9 到 v10（添加 Hermes Agent 支持）");
                         Self::migrate_v9_to_v10(conn)?;
                         Self::set_user_version(conn, 10)?;
-                    }
-                    10 => {
-                        log::info!("迁移数据库从 v10 到 v11（代理按应用默认端口）");
-                        Self::migrate_v10_to_v11(conn)?;
-                        Self::set_user_version(conn, 11)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1230,30 +1225,6 @@ impl Database {
         }
 
         log::info!("v9 -> v10 迁移完成：已添加 Hermes Agent 支持");
-        Ok(())
-    }
-
-    /// v10 -> v11 迁移：代理按应用默认端口
-    fn migrate_v10_to_v11(conn: &Connection) -> Result<(), AppError> {
-        if Self::table_exists(conn, "proxy_config")?
-            && Self::has_column(conn, "proxy_config", "app_type")?
-            && Self::has_column(conn, "proxy_config", "listen_port")?
-        {
-            conn.execute(
-                "UPDATE proxy_config SET listen_port = 15722
-                 WHERE app_type = 'codex' AND listen_port = 15721",
-                [],
-            )
-            .map_err(|e| AppError::Database(format!("迁移 Codex 代理端口失败: {e}")))?;
-            conn.execute(
-                "UPDATE proxy_config SET listen_port = 15723
-                 WHERE app_type = 'gemini' AND listen_port = 15721",
-                [],
-            )
-            .map_err(|e| AppError::Database(format!("迁移 Gemini 代理端口失败: {e}")))?;
-        }
-
-        log::info!("v10 -> v11 迁移完成：已设置按应用代理端口");
         Ok(())
     }
 

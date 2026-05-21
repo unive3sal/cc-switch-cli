@@ -3,7 +3,6 @@ use clap::Subcommand;
 use crate::app_config::AppType;
 use crate::cli::ui::{highlight, info, success};
 use crate::error::AppError;
-use crate::proxy::types::AppProxyConfig;
 use crate::{AppState, ProxyConfig};
 
 #[cfg(unix)]
@@ -81,13 +80,13 @@ fn show_proxy() -> Result<(), AppError> {
     let runtime = create_runtime()?;
     let config = runtime.block_on(state.proxy_service.get_config())?;
     let status = runtime.block_on(state.proxy_service.get_status());
-    let app_configs = load_proxy_app_configs(&state, &runtime)?;
+    let app_ports = load_proxy_app_ports(&state)?;
     let takeovers = runtime
         .block_on(state.proxy_service.get_takeover_status())
         .map_err(AppError::Message)?;
 
     println!("{}", highlight(crate::t!("Local Proxy", "本地代理")));
-    for line in build_proxy_overview_lines(&state, &config, &status, &app_configs, &takeovers) {
+    for line in build_proxy_overview_lines(&state, &config, &status, &app_ports, &takeovers) {
         println!("{line}");
     }
 
@@ -152,13 +151,9 @@ fn configure_proxy(app_type: AppType, listen_port: Option<u16>) -> Result<(), Ap
             app_type.as_str()
         )));
     }
-    let mut config = runtime
-        .block_on(state.db.get_proxy_config_for_app(app_type.as_str()))
-        .map_err(AppError::from)?;
-    config.listen_port = listen_port;
-    runtime
-        .block_on(state.db.update_proxy_config_for_app(config))
-        .map_err(AppError::from)?;
+    state
+        .db
+        .set_app_proxy_preferred_port(app_type.as_str(), listen_port)?;
     println!(
         "{}",
         success(&format!(
@@ -364,16 +359,14 @@ fn validate_listen_port(port: u16) -> Result<(), AppError> {
     )))
 }
 
-fn load_proxy_app_configs(
-    state: &AppState,
-    runtime: &tokio::runtime::Runtime,
-) -> Result<Vec<AppProxyConfig>, AppError> {
+fn load_proxy_app_ports(state: &AppState) -> Result<Vec<(AppType, u16)>, AppError> {
     [AppType::Claude, AppType::Codex, AppType::Gemini]
         .into_iter()
         .map(|app| {
-            runtime
-                .block_on(state.db.get_proxy_config_for_app(app.as_str()))
-                .map_err(AppError::from)
+            state
+                .db
+                .get_app_proxy_preferred_port(app.as_str())
+                .map(|port| (app, port))
         })
         .collect()
 }
@@ -381,7 +374,7 @@ fn load_proxy_app_configs(
 fn build_proxy_route_lines(
     config: &ProxyConfig,
     status: &crate::ProxyStatus,
-    app_configs: &[AppProxyConfig],
+    app_ports: &[(AppType, u16)],
     takeovers: &crate::proxy::types::ProxyTakeoverStatus,
 ) -> Vec<String> {
     [
@@ -391,7 +384,7 @@ fn build_proxy_route_lines(
     ]
     .into_iter()
     .map(|(app, label, enabled)| {
-        let configured_port = app_configured_port(app_configs, &app).unwrap_or(config.listen_port);
+        let configured_port = app_configured_port(app_ports, &app).unwrap_or(config.listen_port);
         let worker = status
             .active_workers
             .iter()
@@ -425,18 +418,18 @@ fn build_proxy_route_lines(
     .collect()
 }
 
-fn app_configured_port(app_configs: &[AppProxyConfig], app: &AppType) -> Option<u16> {
-    app_configs
+fn app_configured_port(app_ports: &[(AppType, u16)], app: &AppType) -> Option<u16> {
+    app_ports
         .iter()
-        .find(|config| config.app_type == app.as_str())
-        .map(|config| config.listen_port)
+        .find(|(candidate, _)| candidate == app)
+        .map(|(_, port)| *port)
 }
 
 fn build_proxy_overview_lines(
     state: &AppState,
     config: &ProxyConfig,
     status: &crate::ProxyStatus,
-    app_configs: &[AppProxyConfig],
+    app_ports: &[(AppType, u16)],
     takeovers: &crate::proxy::types::ProxyTakeoverStatus,
 ) -> Vec<String> {
     let current_providers = AppType::all()
@@ -456,7 +449,7 @@ fn build_proxy_overview_lines(
     } else {
         config.listen_address.as_str()
     };
-    let route_lines = build_proxy_route_lines(config, status, app_configs, takeovers);
+    let route_lines = build_proxy_route_lines(config, status, app_ports, takeovers);
 
     let mut lines = vec![
         format!(
@@ -550,7 +543,7 @@ fn build_proxy_overview_lines(
         format!(
             "- ANTHROPIC_BASE_URL=http://{}:{}",
             listen_host,
-            app_configured_port(app_configs, &AppType::Claude).unwrap_or(config.listen_port)
+            app_configured_port(app_ports, &AppType::Claude).unwrap_or(config.listen_port)
         ),
         "- ANTHROPIC_AUTH_TOKEN=proxy-placeholder".to_string(),
         crate::t!(
@@ -612,7 +605,7 @@ mod tests {
     };
 
     use super::{
-        apply_overrides, build_proxy_overview_lines, load_proxy_app_configs, validate_listen_port,
+        apply_overrides, build_proxy_overview_lines, load_proxy_app_ports, validate_listen_port,
     };
 
     #[test]
@@ -649,39 +642,15 @@ mod tests {
         };
         let mut config = crate::ProxyConfig::default();
         config.listen_port = 15721;
-        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
-        runtime.block_on(async {
-            let mut claude = db
-                .get_proxy_config_for_app("claude")
-                .await
-                .expect("load claude proxy config");
-            claude.listen_port = 15721;
-            claude.enabled = true;
-            db.update_proxy_config_for_app(claude)
-                .await
-                .expect("save claude proxy config");
-
-            let mut codex = db
-                .get_proxy_config_for_app("codex")
-                .await
-                .expect("load codex proxy config");
-            codex.listen_port = 15722;
-            codex.enabled = false;
-            db.update_proxy_config_for_app(codex)
-                .await
-                .expect("save codex proxy config");
-
-            let mut gemini = db
-                .get_proxy_config_for_app("gemini")
-                .await
-                .expect("load gemini proxy config");
-            gemini.listen_port = 15723;
-            gemini.enabled = true;
-            db.update_proxy_config_for_app(gemini)
-                .await
-                .expect("save gemini proxy config");
-        });
-        let app_configs = load_proxy_app_configs(&state, &runtime).expect("load app proxy configs");
+        db.set_proxy_flags_sync("claude", true, false)
+            .expect("enable claude proxy route");
+        db.set_app_proxy_preferred_port("codex", 15722)
+            .expect("save codex preferred proxy port");
+        db.set_proxy_flags_sync("gemini", true, false)
+            .expect("enable gemini proxy route");
+        db.set_app_proxy_preferred_port("gemini", 15723)
+            .expect("save gemini preferred proxy port");
+        let app_ports = load_proxy_app_ports(&state).expect("load app proxy ports");
         let status = ProxyStatus {
             running: true,
             address: "127.0.0.1".to_string(),
@@ -708,7 +677,7 @@ mod tests {
             gemini: true,
         };
 
-        let lines = build_proxy_overview_lines(&state, &config, &status, &app_configs, &takeover);
+        let lines = build_proxy_overview_lines(&state, &config, &status, &app_ports, &takeover);
         let output = lines.join("\n");
 
         assert!(
@@ -774,10 +743,9 @@ mod tests {
         let config = crate::ProxyConfig::default();
         let status = ProxyStatus::default();
         let takeover = ProxyTakeoverStatus::default();
-        let runtime = tokio::runtime::Runtime::new().expect("create runtime");
-        let app_configs = load_proxy_app_configs(&state, &runtime).expect("load app proxy configs");
+        let app_ports = load_proxy_app_ports(&state).expect("load app proxy ports");
 
-        let lines = build_proxy_overview_lines(&state, &config, &status, &app_configs, &takeover);
+        let lines = build_proxy_overview_lines(&state, &config, &status, &app_ports, &takeover);
         let output = lines.join("\n");
 
         assert!(

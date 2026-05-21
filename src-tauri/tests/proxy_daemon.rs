@@ -755,23 +755,10 @@ fn seed_minimal_claude_provider(sandbox: &TestSandbox) {
         .db
         .set_current_provider("claude", &provider.id)
         .expect("set sandbox current claude provider");
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("create test runtime");
-    runtime.block_on(async {
-        let mut config = state
-            .db
-            .get_proxy_config_for_app("claude")
-            .await
-            .expect("load sandbox claude proxy config");
-        config.listen_port = listen_port;
-        state
-            .db
-            .update_proxy_config_for_app(config)
-            .await
-            .expect("update sandbox claude proxy port");
-    });
+    state
+        .db
+        .set_app_proxy_preferred_port("claude", listen_port)
+        .expect("update sandbox claude proxy preferred port");
 
     let _ = sandbox; // tie lifetime so the sandbox outlives this seed
 }

@@ -94,14 +94,8 @@ fn load_runtime_session_worker_count(state: &AppState) -> usize {
 }
 
 async fn set_app_proxy_port(db: &Database, app_type: &str, port: u16) {
-    let mut config = db
-        .get_proxy_config_for_app(app_type)
-        .await
-        .unwrap_or_else(|_| panic!("get {app_type} proxy config"));
-    config.listen_port = port;
-    db.update_proxy_config_for_app(config)
-        .await
-        .unwrap_or_else(|_| panic!("update {app_type} proxy port"));
+    db.set_app_proxy_preferred_port(app_type, port)
+        .unwrap_or_else(|_| panic!("update {app_type} proxy preferred port"));
 }
 
 async fn set_claude_proxy_port(db: &Database, port: u16) {

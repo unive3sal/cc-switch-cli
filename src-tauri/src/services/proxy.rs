@@ -476,6 +476,20 @@ impl ProxyService {
         Ok(info)
     }
 
+    async fn runtime_config_for_app(&self, app_type: &AppType) -> Result<ProxyConfig, String> {
+        let mut config = self.get_config().await.map_err(|e| e.to_string())?;
+        config.listen_port = self
+            .db
+            .get_app_proxy_preferred_port(app_type.as_str())
+            .map_err(|error| {
+                format!(
+                    "load proxy preference for {} failed: {error}",
+                    app_type.as_str()
+                )
+            })?;
+        Ok(config)
+    }
+
     pub(crate) fn publish_runtime_session_if_needed(
         &self,
         info: &ProxyServerInfo,
@@ -1263,7 +1277,7 @@ impl ProxyService {
             .await?;
 
         if !self.is_running().await {
-            let config = self.get_config().await.map_err(|e| e.to_string())?;
+            let config = self.runtime_config_for_app(app_type).await?;
             self.start_with_resolved_config_unlocked(config).await?;
         }
 
@@ -1707,13 +1721,12 @@ impl ProxyService {
         app_type: &AppType,
     ) -> Result<(String, String), String> {
         let persisted = self.get_config().await.map_err(|e| e.to_string())?;
-        let app_proxy = self
+        let preferred_port = self
             .db
-            .get_proxy_config_for_app(app_type.as_str())
-            .await
+            .get_app_proxy_preferred_port(app_type.as_str())
             .map_err(|error| {
                 format!(
-                    "load proxy config for {} failed: {error}",
+                    "load proxy preference for {} failed: {error}",
                     app_type.as_str()
                 )
             })?;
@@ -1727,7 +1740,7 @@ impl ProxyService {
             .as_ref()
             .map(|session| session.port)
             .filter(|port| *port != 0)
-            .unwrap_or(app_proxy.listen_port);
+            .unwrap_or(preferred_port);
 
         let connect_host = match listen_address.as_str() {
             "0.0.0.0" => "127.0.0.1".to_string(),
@@ -2970,6 +2983,76 @@ mod tests {
                 .expect("load claude proxy config")
                 .enabled
         );
+        service.stop().await.expect("stop proxy runtime");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn takeover_activation_uses_app_preferred_port_from_settings_kv() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        std::fs::create_dir_all(
+            get_claude_settings_path()
+                .parent()
+                .expect("claude settings parent dir"),
+        )
+        .expect("create ~/.claude");
+        write_json_file(
+            &get_claude_settings_path(),
+            &json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "fresh-live-token"
+                }
+            }),
+        )
+        .expect("seed claude live config");
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        let provider = Provider::with_id(
+            "claude-provider".to_string(),
+            "Claude Provider".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                    "ANTHROPIC_AUTH_TOKEN": "provider-token"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save claude provider");
+        db.set_current_provider("claude", &provider.id)
+            .expect("set current claude provider");
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("reserve free local port");
+        let preferred_port = listener
+            .local_addr()
+            .expect("read reserved listener address")
+            .port();
+        drop(listener);
+        db.set_app_proxy_preferred_port("claude", preferred_port)
+            .expect("persist claude preferred proxy port");
+
+        service
+            .set_takeover_for_app("claude", true)
+            .await
+            .expect("enable claude takeover");
+
+        let status = service.get_status().await;
+        assert_eq!(status.port, preferred_port);
+        let live: Value =
+            read_json_file(&get_claude_settings_path()).expect("read claude live config");
+        let expected_proxy_url = format!("http://127.0.0.1:{preferred_port}");
+        assert_eq!(
+            live.pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(Value::as_str),
+            Some(expected_proxy_url.as_str())
+        );
+
         service.stop().await.expect("stop proxy runtime");
     }
 

@@ -147,18 +147,18 @@ impl Supervisor {
             (token, rx)
         };
 
-        let app_config = match self.db.get_proxy_config_for_app(&app_key).await {
-            Ok(config) => config,
-            Err(err) => {
-                self.clear_pending_worker_registration(&app).await;
-                return Err(format!("load proxy config for {app_key} failed: {err}"));
-            }
-        };
         let global_config = match self.db.get_global_proxy_config().await {
             Ok(config) => config,
             Err(err) => {
                 self.clear_pending_worker_registration(&app).await;
                 return Err(format!("load global proxy config failed: {err}"));
+            }
+        };
+        let listen_port = match self.db.get_app_proxy_preferred_port(&app_key) {
+            Ok(port) => port,
+            Err(err) => {
+                self.clear_pending_worker_registration(&app).await;
+                return Err(format!("load proxy preference for {app_key} failed: {err}"));
             }
         };
 
@@ -168,7 +168,7 @@ impl Supervisor {
             .arg("--listen-address")
             .arg(global_config.listen_address)
             .arg("--listen-port")
-            .arg(app_config.listen_port.to_string())
+            .arg(listen_port.to_string())
             .env(DAEMON_SOCKET_ENV, &self.socket_path)
             .env(SESSION_TOKEN_ENV, &session_token)
             .env(RESTORE_GUARD_BYPASS_ENV, "1")

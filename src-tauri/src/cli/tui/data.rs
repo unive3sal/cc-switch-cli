@@ -1006,6 +1006,7 @@ fn load_proxy_snapshot(app_type: &AppType) -> Result<ProxySnapshot, AppError> {
     runtime.block_on(async {
         let config = state.proxy_service.get_global_config().await?;
         let app_proxy_config = state.db.get_proxy_config_for_app(app_type.as_str()).await?;
+        let configured_listen_port = state.db.get_app_proxy_preferred_port(app_type.as_str())?;
         let runtime_status = state.proxy_service.get_status().await;
         let takeover = state
             .proxy_service
@@ -1031,7 +1032,7 @@ fn load_proxy_snapshot(app_type: &AppType) -> Result<ProxySnapshot, AppError> {
             .find(|worker| worker.app_type == current_app)
             .map(|worker| worker.port)
             .or_else(|| (runtime_status.port != 0).then_some(runtime_status.port))
-            .unwrap_or(app_proxy_config.listen_port);
+            .unwrap_or(configured_listen_port);
         let default_cost_multiplier = state
             .db
             .get_default_cost_multiplier(app_type.as_str())
@@ -1051,7 +1052,7 @@ fn load_proxy_snapshot(app_type: &AppType) -> Result<ProxySnapshot, AppError> {
             gemini_takeover: takeover.gemini,
             default_cost_multiplier,
             configured_listen_address: config.listen_address.clone(),
-            configured_listen_port: app_proxy_config.listen_port,
+            configured_listen_port,
             listen_address,
             listen_port,
             uptime_seconds: runtime_status.uptime_seconds,
