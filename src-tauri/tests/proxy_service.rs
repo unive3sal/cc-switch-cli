@@ -974,8 +974,7 @@ async fn managed_session_keeps_runtime_alive_while_another_supported_app_is_atta
 #[cfg(unix)]
 #[tokio::test]
 #[serial]
-async fn managed_session_disable_last_app_terminates_external_process_even_when_status_probe_fails()
-{
+async fn managed_session_disable_last_app_does_not_terminate_when_status_probe_fails() {
     let _guard = lock_test_mutex();
     reset_test_fs();
     let _home = ensure_test_home();
@@ -1020,25 +1019,28 @@ async fn managed_session_disable_last_app_terminates_external_process_even_when_
 
     let status = state.proxy_service.get_status().await;
     assert!(
-        status.running,
-        "owned managed external markers should still report running when /status probe is unreachable"
+        !status.running,
+        "managed external markers should not report running when /status probe is unreachable"
     );
     assert!(
         state
             .db
             .get_setting("proxy_runtime_session")
             .expect("read runtime session marker after unreachable get_status")
-            .is_some(),
-        "owned managed external marker should survive an unreachable /status probe so last-app disable can still stop it"
+            .is_none(),
+        "unreachable managed external markers should be cleared instead of treated as owned"
     );
 
     state
         .proxy_service
         .set_managed_session_for_app("claude", false)
         .await
-        .expect("disable final managed app and stop runtime");
+        .expect("disable final managed app and clear runtime marker");
 
-    wait_for(Duration::from_secs(5), || !is_process_alive(runtime_pid));
+    assert!(
+        is_process_alive(runtime_pid),
+        "unreachable status must not terminate a process based only on stale persisted metadata"
+    );
 
     assert!(
         state
@@ -1058,6 +1060,8 @@ async fn managed_session_disable_last_app_terminates_external_process_even_when_
         !global.proxy_enabled,
         "stopping the last managed app should persist global proxy enabled=false"
     );
+
+    ensure_process_stopped(runtime_pid);
 }
 
 #[cfg(unix)]

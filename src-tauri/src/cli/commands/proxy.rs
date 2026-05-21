@@ -176,11 +176,14 @@ fn serve_proxy(
 
     runtime.block_on(async move {
         let service = state.proxy_service.clone();
-        if !takeovers.is_empty() && service.has_persisted_managed_sessions() {
-            return Err(AppError::Message(
-                "cannot run foreground proxy takeover while a daemon-managed proxy session is active; disable daemon-managed proxy routes first"
-                    .to_string(),
-            ));
+        if !takeovers.is_empty() {
+            let status = service.get_status().await;
+            if status.running && !status.active_workers.is_empty() {
+                return Err(AppError::Message(
+                    "cannot run foreground proxy takeover while a daemon-managed proxy session is active; disable daemon-managed proxy routes first"
+                        .to_string(),
+                ));
+            }
         }
         let base_config = service.get_config().await?;
         let effective_config = apply_overrides(&base_config, listen_address, listen_port)?;

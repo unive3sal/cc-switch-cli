@@ -358,8 +358,7 @@ impl ProxyService {
     /// per-app takeover via the same code path the supervisor uses, takes the
     /// cross-process state-mutation guard around it (so a concurrent CLI
     /// invocation can't race the live-config restore), and clears the matching
-    /// daemon-managed runtime marker. If the daemon died ungracefully, this
-    /// also stops the orphaned worker before removing its persisted PID.
+    /// daemon-managed runtime marker.
     async fn local_disable_takeover(&self, app_type: &str) -> Result<(), String> {
         let app = Self::takeover_app_from_str(app_type)?;
         let _guard = crate::services::state_coordination::acquire_restore_mutation_guard().await?;
@@ -374,28 +373,17 @@ impl ProxyService {
         }
         if let Some(session) = self.load_persisted_runtime_session_for_app(&app) {
             if session.kind.is_managed_external() {
-                let should_terminate = match Self::probe_external_proxy_status(&session).await {
-                    ExternalProxyStatusProbe::Matched(_) => true,
-                    ExternalProxyStatusProbe::Mismatched => false,
-                    ExternalProxyStatusProbe::Unreachable => {
-                        Self::has_managed_external_ownership_signal(&session)
-                    }
-                };
-                if Self::is_process_alive(session.pid) && should_terminate {
+                if matches!(
+                    Self::probe_external_proxy_status(&session).await,
+                    ExternalProxyStatusProbe::Matched(_)
+                ) && Self::is_process_alive(session.pid)
+                {
                     Self::terminate_external_process(session.pid).await?;
                 }
             }
         }
         let _ = self.clear_persisted_runtime_session_for_app(&app);
         Ok(())
-    }
-
-    pub fn has_persisted_managed_sessions(&self) -> bool {
-        self.load_persisted_runtime_sessions()
-            .into_iter()
-            .any(|session| {
-                session.kind.is_managed_external() && Self::is_process_alive(session.pid)
-            })
     }
 
     pub async fn set_managed_session_for_app(
@@ -565,16 +553,11 @@ impl ProxyService {
 
         if let Some(session) = self.load_persisted_runtime_session() {
             if session.kind.is_managed_external() {
-                let probe = Self::probe_external_proxy_status(&session).await;
-                let should_terminate = match probe {
-                    ExternalProxyStatusProbe::Matched(_) => true,
-                    ExternalProxyStatusProbe::Mismatched => false,
-                    ExternalProxyStatusProbe::Unreachable => {
-                        Self::has_managed_external_ownership_signal(&session)
-                    }
-                };
-
-                if Self::is_process_alive(session.pid) && should_terminate {
+                if matches!(
+                    Self::probe_external_proxy_status(&session).await,
+                    ExternalProxyStatusProbe::Matched(_)
+                ) && Self::is_process_alive(session.pid)
+                {
                     Self::terminate_external_process(session.pid).await?;
                     stopped_runtime = true;
                 }
@@ -634,38 +617,7 @@ impl ProxyService {
                         stale_app_keys.push(session.app_type.clone());
                     }
                     ExternalProxyStatusProbe::Unreachable => {
-                        if Self::has_managed_external_ownership_signal(&session) {
-                            let uptime_seconds =
-                                chrono::DateTime::parse_from_rfc3339(&session.started_at)
-                                    .ok()
-                                    .map(|started_at| {
-                                        let started_at = started_at.with_timezone(&chrono::Utc);
-                                        (chrono::Utc::now() - started_at).num_seconds().max(0)
-                                            as u64
-                                    })
-                                    .unwrap_or(0);
-                            workers.push(crate::proxy::types::ActiveWorker {
-                                app_type: session
-                                    .app_type
-                                    .clone()
-                                    .unwrap_or_else(|| "proxy".to_string()),
-                                address: session.address.clone(),
-                                port: session.port,
-                                pid: Some(session.pid),
-                            });
-                            if primary_status.is_none() {
-                                primary_status = Some(ProxyStatus {
-                                    running: true,
-                                    address: session.address.clone(),
-                                    port: session.port,
-                                    uptime_seconds,
-                                    managed_session_token: session.session_token.clone(),
-                                    ..ProxyStatus::default()
-                                });
-                            }
-                        } else {
-                            stale_app_keys.push(session.app_type.clone());
-                        }
+                        stale_app_keys.push(session.app_type.clone());
                     }
                 }
             }
@@ -2239,79 +2191,6 @@ impl ProxyService {
         {
             pid == std::process::id()
         }
-    }
-
-    fn has_managed_external_ownership_signal(session: &PersistedProxyRuntimeSession) -> bool {
-        session.session_token.is_some()
-            && (Self::is_detached_session_leader(session.pid)
-                || Self::process_looks_like_cc_switch_proxy_worker(session.pid))
-    }
-
-    #[cfg(unix)]
-    fn process_looks_like_cc_switch_proxy_worker(pid: u32) -> bool {
-        if pid == 0 {
-            return false;
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            let output = std::process::Command::new("ps")
-                .args(["-p", &pid.to_string(), "-o", "command="])
-                .output();
-            let Ok(output) = output else {
-                return false;
-            };
-            if !output.status.success() {
-                return false;
-            }
-            let command = String::from_utf8_lossy(&output.stdout);
-            return command.contains("cc-switch")
-                && command.contains("proxy serve")
-                && command.contains("--listen-port");
-        }
-
-        #[cfg(target_os = "linux")]
-        {
-            let path = format!("/proc/{pid}/cmdline");
-            let Ok(raw) = std::fs::read(path) else {
-                return false;
-            };
-            let command = raw
-                .split(|byte| *byte == 0)
-                .filter(|part| !part.is_empty())
-                .map(|part| String::from_utf8_lossy(part))
-                .collect::<Vec<_>>()
-                .join(" ");
-            return command.contains("cc-switch")
-                && command.contains("proxy serve")
-                && command.contains("--listen-port");
-        }
-
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-        {
-            false
-        }
-    }
-
-    #[cfg(not(unix))]
-    fn process_looks_like_cc_switch_proxy_worker(_pid: u32) -> bool {
-        false
-    }
-
-    #[cfg(unix)]
-    fn is_detached_session_leader(pid: u32) -> bool {
-        if pid == 0 {
-            return false;
-        }
-
-        let sid = unsafe { libc::getsid(pid as i32) };
-        let pgid = unsafe { libc::getpgid(pid as i32) };
-        sid == pid as i32 && pgid == pid as i32
-    }
-
-    #[cfg(not(unix))]
-    fn is_detached_session_leader(_pid: u32) -> bool {
-        false
     }
 
     async fn managed_session_ready_info(
