@@ -70,6 +70,30 @@ fn with_common_enabled(mut provider: Provider) -> Provider {
 }
 
 #[test]
+fn extract_codex_common_config_excludes_profile_model_selection() {
+    let extracted = ProviderService::extract_codex_common_config_from_config_toml(
+        r#"model_provider = "aihubmix"
+model = "gpt-5.4"
+disable_response_storage = true
+
+[model_providers.aihubmix]
+base_url = "https://aihubmix.example/v1"
+
+[profiles.work]
+model_provider = "aihubmix"
+model = "gpt-5.4"
+approval_policy = "never"
+"#,
+    )
+    .expect("extract common config");
+
+    assert!(extracted.contains("disable_response_storage = true"));
+    assert!(extracted.contains("approval_policy = \"never\""));
+    assert!(!extracted.contains("model_provider"));
+    assert!(!extracted.contains("model = \"gpt-5.4\""));
+}
+
+#[test]
 fn capture_codex_temp_launch_snapshot_persists_auth_and_config() {
     let mut config = MultiAppConfig::default();
     config.ensure_app(&AppType::Codex);
