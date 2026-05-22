@@ -93,6 +93,30 @@ impl ProviderService {
         // Remove entire model_providers table (provider-specific configuration)
         root.remove("model_providers");
 
+        if let Some(profiles) = root
+            .get_mut("profiles")
+            .and_then(|item| item.as_table_like_mut())
+        {
+            let profile_keys: Vec<String> =
+                profiles.iter().map(|(key, _)| key.to_string()).collect();
+            for profile_key in profile_keys {
+                let Some(profile) = profiles
+                    .get_mut(&profile_key)
+                    .and_then(|item| item.as_table_like_mut())
+                else {
+                    continue;
+                };
+                profile.remove("model");
+                profile.remove("model_provider");
+                if profile.is_empty() {
+                    profiles.remove(&profile_key);
+                }
+            }
+            if profiles.is_empty() {
+                root.remove("profiles");
+            }
+        }
+
         // Clean up multiple empty lines (keep at most one blank line).
         let mut cleaned = String::new();
         let mut blank_run = 0usize;
