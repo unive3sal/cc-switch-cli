@@ -385,12 +385,12 @@ cc-switch proxy serve --takeover claude           # 前台调试模式；存在 
 
 ### 🧪 环境与本地工具
 
-检查环境变量冲突，以及 Claude/Codex/Gemini/OpenCode CLI 是否已经装好。
+检查环境变量冲突，以及 Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw CLI 是否已经装好。
 
 ```bash
 cc-switch env check                  # 检查环境变量冲突
 cc-switch env list                   # 列出相关环境变量
-cc-switch env tools                  # 检查 Claude/Codex/Gemini/OpenCode CLI
+cc-switch env tools                  # 检查 Claude/Codex/Gemini/OpenCode/Hermes/OpenClaw CLI
 ```
 
 ### 🌐 多语言支持

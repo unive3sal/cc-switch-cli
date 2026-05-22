@@ -1819,6 +1819,11 @@ fn home_shows_local_env_check_section() {
     let all = all_text(&buf);
 
     assert!(all.contains("Local environment check"));
+    for tool_name in [
+        "Claude", "Codex", "Gemini", "OpenCode", "Hermes", "OpenClaw",
+    ] {
+        assert!(all.contains(tool_name), "missing {tool_name} in:\n{all}");
+    }
     assert!(!all.contains("Session Context"));
 }
 
