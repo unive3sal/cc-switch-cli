@@ -169,6 +169,14 @@ impl ProxyService {
         })
     }
 
+    pub(crate) fn has_alive_managed_external_worker_blocking(&self) -> Result<bool, String> {
+        self.run_in_blocking_runtime(|service| async move {
+            Ok([AppType::Claude, AppType::Codex, AppType::Gemini]
+                .iter()
+                .any(|app_type| service.has_alive_managed_external_worker_for_app(app_type)))
+        })
+    }
+
     pub fn new(db: Arc<Database>) -> Self {
         let runtime = Self::shared_runtime_state(db.runtime_key());
         Self {
@@ -546,6 +554,10 @@ impl ProxyService {
     pub async fn recover_takeovers_on_startup(&self) -> Result<(), String> {
         for app_type in [AppType::Claude, AppType::Codex, AppType::Gemini] {
             let app_key = app_type.as_str();
+            if self.has_alive_managed_external_worker_for_app(&app_type) {
+                continue;
+            }
+
             let app_proxy = self
                 .db
                 .get_proxy_config_for_app(app_key)
@@ -825,12 +837,7 @@ impl ProxyService {
 
     async fn ensure_proxy_routing_active_for_app(&self, app_type: &str) -> Result<(), String> {
         let app_type = Self::takeover_app_from_str(app_type)?;
-        let has_managed_worker = self
-            .load_persisted_runtime_session_for_app(&app_type)
-            .is_some_and(|session| {
-                session.kind.is_managed_external() && Self::is_process_alive(session.pid)
-            });
-        if !has_managed_worker {
+        if !self.has_alive_managed_external_worker_for_app(&app_type) {
             return Err(
                 "automatic failover requires daemon-managed proxy routing for this app".to_string(),
             );
@@ -866,9 +873,9 @@ impl ProxyService {
         let first_provider_id = self.first_failover_provider_id(app_type)?;
         let app_type = Self::takeover_app_from_str(app_type)?;
         let app_key = app_type.as_str();
-        self.set_managed_session_for_app(app_key, true).await?;
         self.switch_proxy_target(app_key, &first_provider_id)
             .await?;
+        self.set_managed_session_for_app(app_key, true).await?;
         self.persist_auto_failover_for_app(app_key, true).await?;
 
         Ok(())
@@ -2230,6 +2237,21 @@ impl ProxyService {
         self.load_persisted_runtime_session()
     }
 
+    fn is_app_owned_managed_external_worker(session: &PersistedProxyRuntimeSession) -> bool {
+        session.kind.is_managed_external()
+            && session.session_token.is_some()
+            && session.app_type.is_some()
+    }
+
+    fn has_alive_managed_external_worker_for_app(&self, app_type: &AppType) -> bool {
+        self.load_persisted_runtime_session_for_app(app_type)
+            .is_some_and(|session| {
+                Self::is_app_owned_managed_external_worker(&session)
+                    && session.app_type.as_deref() == Some(app_type.as_str())
+                    && Self::is_process_alive(session.pid)
+            })
+    }
+
     fn is_process_alive(pid: u32) -> bool {
         if pid == 0 {
             return false;
@@ -2490,7 +2512,7 @@ mod tests {
     use super::*;
     use crate::provider::ProviderMeta;
     use crate::proxy::circuit_breaker::CircuitBreakerConfig;
-    use crate::test_support::{lock_test_home_and_settings, set_test_home_override};
+    use crate::test_support::{lock_test_home_and_settings, restore_env, set_test_home_override};
     use serial_test::serial;
     use std::ffi::OsString;
     use std::path::Path;
@@ -2528,6 +2550,31 @@ mod tests {
             .expect("save failover provider");
         db.add_to_failover_queue(app_type, &provider.id)
             .expect("queue failover provider");
+    }
+
+    fn use_ephemeral_app_proxy_port(db: &Database, app_type: &str) {
+        db.set_app_proxy_preferred_port(app_type, 0)
+            .unwrap_or_else(|_| panic!("set {app_type} app proxy port"));
+    }
+
+    fn seed_managed_worker_for_app(db: &Database, app_type: &str) {
+        let session = PersistedProxyRuntimeSession {
+            pid: std::process::id(),
+            address: "127.0.0.1".to_string(),
+            port: 0,
+            started_at: chrono::Utc::now().to_rfc3339(),
+            kind: PersistedProxyRuntimeSessionKind::ManagedExternal,
+            session_token: Some(format!("{app_type}-test-token")),
+            app_type: Some(app_type.to_string()),
+        };
+        let serialized = serde_json::to_string(&PersistedProxyRuntimeSessions {
+            workers: HashMap::from([(app_type.to_string(), session)]),
+        })
+        .expect("serialize managed worker session");
+        db.set_setting(PROXY_RUNTIME_SESSION_KEY, &serialized)
+            .expect("persist managed worker session");
+        db.set_proxy_flags_sync(app_type, true, false)
+            .unwrap_or_else(|_| panic!("seed {app_type} proxy routing"));
     }
 
     struct ManagedRuntimeEnvGuard {
@@ -2568,7 +2615,12 @@ mod tests {
         _lock: crate::test_support::TestHomeSettingsLock,
         old_home: Option<OsString>,
         old_userprofile: Option<OsString>,
+        old_xdg_config_home: Option<OsString>,
+        old_xdg_runtime_dir: Option<OsString>,
+        old_xdg_state_home: Option<OsString>,
         old_config_dir: Option<OsString>,
+        old_claude_config_dir: Option<OsString>,
+        old_codex_home: Option<OsString>,
     }
 
     impl TestHomeEnvGuard {
@@ -2576,35 +2628,46 @@ mod tests {
             let lock = lock_test_home_and_settings();
             let old_home = std::env::var_os("HOME");
             let old_userprofile = std::env::var_os("USERPROFILE");
+            let old_xdg_config_home = std::env::var_os("XDG_CONFIG_HOME");
+            let old_xdg_runtime_dir = std::env::var_os("XDG_RUNTIME_DIR");
+            let old_xdg_state_home = std::env::var_os("XDG_STATE_HOME");
             let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
+            let old_claude_config_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
+            let old_codex_home = std::env::var_os("CODEX_HOME");
             std::env::set_var("HOME", home);
             std::env::set_var("USERPROFILE", home);
+            std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+            std::env::set_var("XDG_RUNTIME_DIR", home.join(".runtime"));
+            std::env::set_var("XDG_STATE_HOME", home.join(".state"));
             std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
+            std::env::set_var("CLAUDE_CONFIG_DIR", home.join(".claude"));
+            std::env::set_var("CODEX_HOME", home.join(".codex"));
             set_test_home_override(Some(home));
             crate::settings::reload_test_settings();
             Self {
                 _lock: lock,
                 old_home,
                 old_userprofile,
+                old_xdg_config_home,
+                old_xdg_runtime_dir,
+                old_xdg_state_home,
                 old_config_dir,
+                old_claude_config_dir,
+                old_codex_home,
             }
         }
     }
 
     impl Drop for TestHomeEnvGuard {
         fn drop(&mut self) {
-            match &self.old_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match &self.old_userprofile {
-                Some(value) => std::env::set_var("USERPROFILE", value),
-                None => std::env::remove_var("USERPROFILE"),
-            }
-            match &self.old_config_dir {
-                Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
-                None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
-            }
+            restore_env("HOME", &self.old_home);
+            restore_env("USERPROFILE", &self.old_userprofile);
+            restore_env("XDG_CONFIG_HOME", &self.old_xdg_config_home);
+            restore_env("XDG_RUNTIME_DIR", &self.old_xdg_runtime_dir);
+            restore_env("XDG_STATE_HOME", &self.old_xdg_state_home);
+            restore_env("CC_SWITCH_CONFIG_DIR", &self.old_config_dir);
+            restore_env("CLAUDE_CONFIG_DIR", &self.old_claude_config_dir);
+            restore_env("CODEX_HOME", &self.old_codex_home);
             set_test_home_override(self.old_home.as_deref().map(Path::new));
             crate::settings::reload_test_settings();
         }
@@ -2644,16 +2707,7 @@ mod tests {
             .expect("queue provider b");
         db.add_to_failover_queue("claude", &provider_a.id)
             .expect("queue provider a");
-        let mut runtime_config = service.get_config().await.expect("get proxy config");
-        runtime_config.listen_port = 0;
-        service
-            .update_config(&runtime_config)
-            .await
-            .expect("persist runtime config");
-        service
-            .set_takeover_for_app("claude", true)
-            .await
-            .expect("enable claude takeover");
+        seed_managed_worker_for_app(db.as_ref(), "claude");
 
         service
             .enable_auto_failover_for_app("claude")
@@ -2677,8 +2731,6 @@ mod tests {
                 .as_deref(),
             Some("provider-b")
         );
-
-        service.stop().await.expect("stop proxy runtime");
     }
 
     #[tokio::test]
@@ -2706,7 +2758,9 @@ mod tests {
             .expect_err("failover should require active proxy routing");
 
         assert!(
-            error.contains("local proxy") || error.contains("proxy takeover"),
+            error.contains("daemon-managed proxy routing")
+                || error.contains("proxy takeover")
+                || error.contains("local proxy"),
             "{error}"
         );
         let config = db
@@ -2782,8 +2836,9 @@ mod tests {
         let temp_home = TempDir::new().expect("create temp home");
         let _env = TestHomeEnvGuard::set(temp_home.path());
 
-        let db = Arc::new(Database::memory().expect("create database"));
+        let db = Arc::new(Database::init().expect("create database"));
         let service = ProxyService::new(db.clone());
+        use_ephemeral_app_proxy_port(db.as_ref(), "claude");
         let provider = Provider::with_id(
             "queue-head".to_string(),
             "Queue Head".to_string(),
@@ -2799,12 +2854,7 @@ mod tests {
             .expect("save queued provider");
         db.add_to_failover_queue("claude", &provider.id)
             .expect("queue provider");
-        let mut runtime_config = service.get_config().await.expect("get proxy config");
-        runtime_config.listen_port = 0;
-        service
-            .update_config(&runtime_config)
-            .await
-            .expect("persist runtime config");
+        seed_managed_worker_for_app(db.as_ref(), "claude");
 
         service
             .enable_proxy_and_auto_failover_for_app("claude")
@@ -2840,6 +2890,7 @@ mod tests {
 
         let db = Arc::new(Database::memory().expect("create database"));
         let service = ProxyService::new(db.clone());
+        use_ephemeral_app_proxy_port(db.as_ref(), "claude");
 
         let error = service
             .set_takeover_for_app("claude", true)
@@ -2898,12 +2949,7 @@ mod tests {
             .expect("save claude provider");
         db.set_current_provider("claude", &provider.id)
             .expect("set current claude provider");
-        let mut runtime_config = service.get_config().await.expect("get proxy config");
-        runtime_config.listen_port = 0;
-        service
-            .update_config(&runtime_config)
-            .await
-            .expect("persist runtime config");
+        use_ephemeral_app_proxy_port(db.as_ref(), "claude");
 
         service
             .set_takeover_for_app("claude", true)
@@ -3082,12 +3128,7 @@ mod tests {
             .await
             .expect("load claude proxy config");
         seed_proxy_flags_raw(&db, &app_proxy.app_type, app_proxy.enabled, true);
-        let mut runtime_config = service.get_config().await.expect("get proxy config");
-        runtime_config.listen_port = 0;
-        service
-            .update_config(&runtime_config)
-            .await
-            .expect("persist runtime config");
+        use_ephemeral_app_proxy_port(db.as_ref(), "claude");
 
         service
             .set_takeover_for_app("claude", true)
@@ -3193,12 +3234,7 @@ mod tests {
         db.set_current_provider("claude", &provider.id)
             .expect("set current claude provider");
 
-        let mut runtime_config = service.get_config().await.expect("get proxy config");
-        runtime_config.listen_port = 0;
-        service
-            .update_config(&runtime_config)
-            .await
-            .expect("persist runtime config");
+        use_ephemeral_app_proxy_port(db.as_ref(), "claude");
 
         service
             .set_takeover_for_app("claude", true)
@@ -3279,12 +3315,7 @@ base_url = "https://api.openai.com/v1"
         db.set_current_provider("codex", &provider.id)
             .expect("set current codex provider");
 
-        let mut runtime_config = service.get_config().await.expect("get proxy config");
-        runtime_config.listen_port = 0;
-        service
-            .update_config(&runtime_config)
-            .await
-            .expect("persist runtime config");
+        use_ephemeral_app_proxy_port(db.as_ref(), "codex");
 
         service
             .set_takeover_for_app("codex", true)
@@ -3380,12 +3411,7 @@ base_url = "https://api.openai.com/v1"
         crate::settings::set_current_provider(&AppType::Codex, Some(&local_current.id))
             .expect("set local current codex provider");
 
-        let mut runtime_config = service.get_config().await.expect("get proxy config");
-        runtime_config.listen_port = 0;
-        service
-            .update_config(&runtime_config)
-            .await
-            .expect("persist runtime config");
+        use_ephemeral_app_proxy_port(db.as_ref(), "codex");
 
         service
             .set_takeover_for_app("codex", true)
@@ -3470,12 +3496,7 @@ base_url = "https://api.openai.com/v1"
         crate::settings::set_current_provider(&AppType::Gemini, Some(&local_current.id))
             .expect("set local current gemini provider");
 
-        let mut runtime_config = service.get_config().await.expect("get proxy config");
-        runtime_config.listen_port = 0;
-        service
-            .update_config(&runtime_config)
-            .await
-            .expect("persist runtime config");
+        use_ephemeral_app_proxy_port(db.as_ref(), "gemini");
 
         service
             .set_takeover_for_app("gemini", true)
@@ -3701,12 +3722,7 @@ base_url = "https://api.openai.com/v1"
             .expect("set current claude provider");
 
         let service = ProxyService::new(db.clone());
-        let mut config = service.get_config().await.expect("read proxy config");
-        config.listen_port = 0;
-        service
-            .update_config(&config)
-            .await
-            .expect("update proxy config");
+        use_ephemeral_app_proxy_port(db.as_ref(), "claude");
 
         let guard = crate::services::state_coordination::acquire_restore_mutation_guard()
             .await

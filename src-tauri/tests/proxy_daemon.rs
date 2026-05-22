@@ -774,6 +774,17 @@ fn read_claude_settings_base_url() -> Option<String> {
         .map(ToString::to_string)
 }
 
+fn wait_for_claude_settings_base_url(expected: Option<&str>, timeout: Duration) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if read_claude_settings_base_url().as_deref() == expected {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    read_claude_settings_base_url().as_deref() == expected
+}
+
 fn free_loopback_port() -> u16 {
     let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
     listener
@@ -818,10 +829,10 @@ fn sigterm_restores_takeover_and_stops_worker() {
         wait_for_daemon_exit(&mut daemon, Duration::from_secs(5)),
         "daemon should exit after SIGTERM"
     );
-    assert_eq!(
-        read_claude_settings_base_url().as_deref(),
-        None,
-        "SIGTERM shutdown should restore the original Claude live config without a base URL"
+    assert!(
+        wait_for_claude_settings_base_url(None, Duration::from_secs(2)),
+        "SIGTERM shutdown should restore the original Claude live config without a base URL; got {:?}",
+        read_claude_settings_base_url()
     );
     assert!(
         !sandbox.socket().exists(),

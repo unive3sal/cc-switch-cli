@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, RwLock};
+use std::time::{Duration, Instant};
 
 use cc_switch_lib::{
     update_settings, AppSettings, AppState, Database, MultiAppConfig, ProviderService, ProxyService,
@@ -20,14 +21,19 @@ pub fn ensure_test_home() -> &'static Path {
     std::env::set_var("HOME", home);
     #[cfg(windows)]
     std::env::set_var("USERPROFILE", home);
-    std::env::set_var("XDG_RUNTIME_DIR", home.join("run"));
-    std::env::set_var("XDG_STATE_HOME", home.join("state"));
+    std::env::set_var("XDG_CONFIG_HOME", home.join(".config"));
+    std::env::set_var("XDG_RUNTIME_DIR", home.join(".runtime"));
+    std::env::set_var("XDG_STATE_HOME", home.join(".state"));
+    std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
+    std::env::set_var("CLAUDE_CONFIG_DIR", home.join(".claude"));
+    std::env::set_var("CODEX_HOME", home.join(".codex"));
     home.as_path()
 }
 
 /// 清理测试目录中生成的配置文件与缓存。
 pub fn reset_test_fs() {
     let home = ensure_test_home();
+    shutdown_test_daemon();
     for sub in [
         ".claude",
         ".codex",
@@ -35,8 +41,8 @@ pub fn reset_test_fs() {
         ".gemini",
         ".openclaw",
         ".config",
-        "run",
-        "state",
+        ".runtime",
+        ".state",
     ] {
         let path = home.join(sub);
         if path.exists() {
@@ -53,6 +59,29 @@ pub fn reset_test_fs() {
     // 重置内存中的设置缓存，确保测试环境不受上一次调用影响
     let _ = update_settings(AppSettings::default());
 }
+
+#[cfg(unix)]
+fn shutdown_test_daemon() {
+    let socket_path = cc_switch_lib::daemon::paths::socket_path();
+    if socket_path.exists() {
+        let _ = cc_switch_lib::daemon::ipc::client::round_trip(
+            &socket_path,
+            &cc_switch_lib::daemon::ipc::protocol::Request::Shutdown,
+        );
+    }
+
+    let pidfile_path = cc_switch_lib::daemon::paths::pidfile_path();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if !socket_path.exists() && !pidfile_path.exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(not(unix))]
+fn shutdown_test_daemon() {}
 
 /// 全局互斥锁，避免多测试并发写入相同的 HOME 目录。
 pub fn test_mutex() -> &'static Mutex<()> {

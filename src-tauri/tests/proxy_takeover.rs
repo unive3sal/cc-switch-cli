@@ -19,6 +19,11 @@ fn find_free_port() -> u16 {
         .port()
 }
 
+async fn set_app_proxy_port(db: &Database, app_type: &str, port: u16) {
+    db.set_app_proxy_preferred_port(app_type, port)
+        .unwrap_or_else(|_| panic!("persist {app_type} app proxy port"));
+}
+
 fn seed_claude_live(value: &Value) {
     let settings_path = get_claude_settings_path();
     if let Some(parent) = settings_path.parent() {
@@ -52,7 +57,7 @@ fn seed_codex_live(auth: &Value, config_text: &str) {
 }
 
 #[cfg(unix)]
-fn load_runtime_session_pid(state: &AppState) -> u32 {
+fn load_runtime_session_pid(state: &AppState, app_type: &str) -> u32 {
     let session: Value = serde_json::from_str(
         &state
             .db
@@ -61,10 +66,17 @@ fn load_runtime_session_pid(state: &AppState) -> u32 {
             .expect("persisted runtime session should exist"),
     )
     .expect("parse runtime session setting");
+
+    if let Some(pid) = session.get("pid").and_then(Value::as_u64) {
+        return pid as u32;
+    }
+
     session
-        .get("pid")
-        .and_then(|value| value.as_u64())
-        .expect("runtime session pid") as u32
+        .get("workers")
+        .and_then(|workers| workers.get(app_type))
+        .and_then(|worker| worker.get("pid"))
+        .and_then(Value::as_u64)
+        .expect("runtime session worker pid") as u32
 }
 
 #[cfg(unix)]
@@ -153,19 +165,15 @@ async fn manual_takeover_can_rewrite_and_restore_claude_live_config() {
     seed_claude_live(&original_live);
 
     let service = ProxyService::new(db.clone());
-    let mut config = service.get_config().await.expect("read proxy config");
-    config.listen_port = find_free_port();
-    service
-        .update_config(&config)
-        .await
-        .expect("update proxy config");
+    let listen_port = find_free_port();
+    set_app_proxy_port(&db, "claude", listen_port).await;
 
     service
         .set_takeover_for_app("claude", true)
         .await
         .expect("enable claude takeover");
 
-    let expected_proxy_url = format!("http://127.0.0.1:{}", config.listen_port);
+    let expected_proxy_url = format!("http://127.0.0.1:{listen_port}");
     let taken_over: Value =
         read_json_file(&get_claude_settings_path()).expect("read taken over claude live config");
     assert_eq!(
@@ -237,6 +245,8 @@ async fn reloading_app_state_does_not_recover_an_active_takeover_session() {
     let _home = ensure_test_home();
 
     let state = AppState::try_new().expect("create app state");
+    let listen_port = find_free_port();
+    set_app_proxy_port(&state.db, "claude", listen_port).await;
     seed_claude_live(&json!({
         "env": {
             "ANTHROPIC_API_KEY": "original-key"
@@ -393,12 +403,8 @@ async fn disabling_claude_takeover_without_backup_restores_synced_live_token() {
     }));
 
     let service = ProxyService::new(db.clone());
-    let mut config = service.get_config().await.expect("read proxy config");
-    config.listen_port = find_free_port();
-    service
-        .update_config(&config)
-        .await
-        .expect("update proxy config");
+    let listen_port = find_free_port();
+    set_app_proxy_port(&db, "claude", listen_port).await;
 
     service
         .set_takeover_for_app("claude", true)
@@ -718,17 +724,8 @@ async fn disabling_managed_proxy_session_restores_current_app_takeover_state() {
     seed_claude_live(&original_live);
 
     let state = AppState::try_new().expect("create app state");
-    let mut config = state
-        .proxy_service
-        .get_config()
-        .await
-        .expect("read proxy config");
-    config.listen_port = find_free_port();
-    state
-        .proxy_service
-        .update_config(&config)
-        .await
-        .expect("persist proxy config");
+    let listen_port = find_free_port();
+    set_app_proxy_port(&state.db, "claude", listen_port).await;
 
     state
         .proxy_service
@@ -798,26 +795,17 @@ async fn startup_recovery_skips_owned_managed_session_when_probe_is_unreachable(
     seed_claude_live(&original_live);
 
     let state = AppState::try_new().expect("create app state");
-    let mut config = state
-        .proxy_service
-        .get_config()
-        .await
-        .expect("read proxy config");
-    config.listen_port = find_free_port();
-    state
-        .proxy_service
-        .update_config(&config)
-        .await
-        .expect("persist proxy config");
+    let listen_port = find_free_port();
+    set_app_proxy_port(&state.db, "claude", listen_port).await;
 
     state
         .proxy_service
         .start_managed_session("claude")
         .await
         .expect("start managed proxy session");
-    let _cleanup = ManagedSessionCleanup::new(load_runtime_session_pid(&state));
+    let _cleanup = ManagedSessionCleanup::new(load_runtime_session_pid(&state, "claude"));
 
-    let managed_proxy_url = format!("http://127.0.0.1:{}", config.listen_port);
+    let managed_proxy_url = format!("http://127.0.0.1:{listen_port}");
     let taken_over: Value =
         read_json_file(&get_claude_settings_path()).expect("read taken over claude live config");
     assert_eq!(
@@ -844,15 +832,25 @@ async fn startup_recovery_skips_owned_managed_session_when_probe_is_unreachable(
         .expect("runtime session marker should exist");
     let mut runtime_session: Value =
         serde_json::from_str(&runtime_session_raw).expect("parse runtime session marker");
-    let original_port = runtime_session
-        .get("port")
-        .and_then(Value::as_u64)
-        .expect("runtime session marker port") as u16;
+    let original_port = if let Some(port) = runtime_session.get("port").and_then(Value::as_u64) {
+        port as u16
+    } else {
+        runtime_session
+            .get("workers")
+            .and_then(|workers| workers.get("claude"))
+            .and_then(|worker| worker.get("port"))
+            .and_then(Value::as_u64)
+            .expect("runtime session worker port") as u16
+    };
     let mut unreachable_port = find_free_port();
     while unreachable_port == original_port {
         unreachable_port = find_free_port();
     }
-    runtime_session["port"] = json!(unreachable_port);
+    if runtime_session.get("port").is_some() {
+        runtime_session["port"] = json!(unreachable_port);
+    } else {
+        runtime_session["workers"]["claude"]["port"] = json!(unreachable_port);
+    }
     state
         .db
         .set_setting("proxy_runtime_session", &runtime_session.to_string())
@@ -935,17 +933,13 @@ async fn disabling_one_managed_app_restores_only_that_app_while_shared_runtime_k
     seed_codex_live(&original_codex_auth, original_codex_config);
 
     let state = AppState::try_new().expect("create app state");
-    let mut config = state
-        .proxy_service
-        .get_config()
-        .await
-        .expect("read proxy config");
-    config.listen_port = find_free_port();
-    state
-        .proxy_service
-        .update_config(&config)
-        .await
-        .expect("persist proxy config");
+    let claude_port = find_free_port();
+    let mut codex_port = find_free_port();
+    while codex_port == claude_port {
+        codex_port = find_free_port();
+    }
+    set_app_proxy_port(&state.db, "claude", claude_port).await;
+    set_app_proxy_port(&state.db, "codex", codex_port).await;
 
     state
         .proxy_service
@@ -957,7 +951,7 @@ async fn disabling_one_managed_app_restores_only_that_app_while_shared_runtime_k
         .set_managed_session_for_app("codex", true)
         .await
         .expect("reuse managed proxy for codex");
-    let _cleanup = ManagedSessionCleanup::new(load_runtime_session_pid(&state));
+    let _cleanup = ManagedSessionCleanup::new(load_runtime_session_pid(&state, "claude"));
 
     state
         .proxy_service

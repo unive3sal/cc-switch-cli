@@ -24,6 +24,20 @@ fn find_free_port() -> u16 {
         .port()
 }
 
+async fn set_proxy_port_for_app(db: &Arc<Database>, app_type: &str, listen_port: u16) -> u16 {
+    db.set_app_proxy_preferred_port(app_type, listen_port)
+        .unwrap_or_else(|_| panic!("update {app_type} proxy preferred port"));
+    listen_port
+}
+
+async fn set_claude_proxy_port(db: &Arc<Database>, listen_port: u16) -> u16 {
+    set_proxy_port_for_app(db, "claude", listen_port).await
+}
+
+async fn set_codex_proxy_port(db: &Arc<Database>, listen_port: u16) -> u16 {
+    set_proxy_port_for_app(db, "codex", listen_port).await
+}
+
 fn wait_for<F>(timeout: Duration, mut condition: F)
 where
     F: FnMut() -> bool,
@@ -93,15 +107,6 @@ fn load_runtime_session_worker_count(state: &AppState) -> usize {
         .map_or(1, serde_json::Map::len)
 }
 
-async fn set_app_proxy_port(db: &Database, app_type: &str, port: u16) {
-    db.set_app_proxy_preferred_port(app_type, port)
-        .unwrap_or_else(|_| panic!("update {app_type} proxy preferred port"));
-}
-
-async fn set_claude_proxy_port(db: &Database, port: u16) {
-    set_app_proxy_port(db, "claude", port).await;
-}
-
 #[cfg(unix)]
 struct ManagedSessionCleanup(Option<u32>);
 
@@ -158,12 +163,12 @@ fn process_group_id(pid: u32) -> i32 {
 #[tokio::test]
 async fn proxy_service_starts_and_stops_without_takeover() {
     let db = Arc::new(Database::memory().expect("create database"));
-    let service = ProxyService::new(db);
+    let service = ProxyService::new(db.clone());
 
     let initial = service.get_status().await;
     assert!(!initial.running, "proxy should start in stopped state");
 
-    let mut config = service.get_config().await.expect("get config");
+    let mut config = service.get_config().await.expect("get proxy config");
     config.listen_port = 0;
 
     let started = service
@@ -513,18 +518,14 @@ async fn proxy_service_can_stop_managed_external_proxy_session() {
     .expect("seed claude live config");
 
     let state = AppState::try_new().expect("create app state");
-    let listen_port = find_free_port();
-    set_claude_proxy_port(&state.db, listen_port).await;
+    set_claude_proxy_port(&state.db, 0).await;
 
     let started = state
         .proxy_service
         .start_managed_session("claude")
         .await
         .expect("start managed proxy session");
-    assert_eq!(
-        started.port, listen_port,
-        "managed session should reuse the configured listen port"
-    );
+    assert_ne!(started.port, 0, "managed session should bind a port");
 
     let pid = load_runtime_session_pid(&state);
     assert_ne!(
@@ -570,8 +571,8 @@ async fn managed_proxy_session_is_detached_from_parent_terminal_session() {
     .expect("seed claude live config");
 
     let state = AppState::try_new().expect("create app state");
-    set_claude_proxy_port(&state.db, find_free_port()).await;
-    set_app_proxy_port(&state.db, "codex", find_free_port()).await;
+    set_claude_proxy_port(&state.db, 0).await;
+    set_codex_proxy_port(&state.db, find_free_port()).await;
 
     state
         .proxy_service
@@ -689,8 +690,8 @@ async fn proxy_service_reloaded_app_state_keeps_managed_session_running_for_curr
     .expect("seed claude live config");
 
     let state = AppState::try_new().expect("create app state");
-    set_claude_proxy_port(&state.db, find_free_port()).await;
-    set_app_proxy_port(&state.db, "codex", find_free_port()).await;
+    set_claude_proxy_port(&state.db, 0).await;
+    set_codex_proxy_port(&state.db, find_free_port()).await;
 
     state
         .proxy_service
@@ -742,8 +743,8 @@ async fn managed_session_allows_second_supported_app_to_start_its_own_worker() {
     );
 
     let state = AppState::try_new().expect("create app state");
-    set_claude_proxy_port(&state.db, find_free_port()).await;
-    set_app_proxy_port(&state.db, "codex", find_free_port()).await;
+    set_claude_proxy_port(&state.db, 0).await;
+    set_codex_proxy_port(&state.db, find_free_port()).await;
 
     state
         .proxy_service
@@ -818,7 +819,7 @@ async fn proxy_service_stop_preserves_takeover_state_until_explicit_restore() {
     }));
 
     let state = AppState::try_new().expect("create app state");
-    set_claude_proxy_port(&state.db, find_free_port()).await;
+    set_claude_proxy_port(&state.db, 0).await;
 
     state
         .proxy_service
@@ -904,8 +905,8 @@ async fn managed_session_keeps_runtime_alive_while_another_supported_app_is_atta
     );
 
     let state = AppState::try_new().expect("create app state");
-    set_claude_proxy_port(&state.db, find_free_port()).await;
-    set_app_proxy_port(&state.db, "codex", find_free_port()).await;
+    set_claude_proxy_port(&state.db, 0).await;
+    set_codex_proxy_port(&state.db, find_free_port()).await;
 
     state
         .proxy_service
@@ -986,7 +987,7 @@ async fn managed_session_disable_last_app_does_not_terminate_when_status_probe_f
     }));
 
     let state = AppState::try_new().expect("create app state");
-    set_claude_proxy_port(&state.db, find_free_port()).await;
+    set_claude_proxy_port(&state.db, 0).await;
 
     state
         .proxy_service

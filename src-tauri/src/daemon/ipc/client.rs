@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 
 use super::protocol::{encode_request, Request, Response};
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const SPAWN_RETRY_INTERVAL: Duration = Duration::from_millis(500);
 const READ_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug)]
@@ -51,21 +52,20 @@ where
     }
 
     let bin = binary_resolver()?;
-    let mut cmd = Command::new(&bin);
-    cmd.arg("daemon")
-        .arg("start")
-        .arg("--detach")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    cmd.spawn()
-        .map_err(|err| ClientError::NoDaemon(format!("spawn daemon failed: {err}")))?;
+    spawn_daemon(&bin)?;
 
     let deadline = Instant::now() + CONNECT_TIMEOUT;
+    let mut next_spawn_attempt = Instant::now() + SPAWN_RETRY_INTERVAL;
     while Instant::now() < deadline {
         if let Ok(stream) = UnixStream::connect(socket_path) {
             return Ok(stream);
         }
+
+        if Instant::now() >= next_spawn_attempt {
+            spawn_daemon(&bin)?;
+            next_spawn_attempt = Instant::now() + SPAWN_RETRY_INTERVAL;
+        }
+
         std::thread::sleep(Duration::from_millis(75));
     }
     Err(ClientError::NoDaemon(format!(
@@ -73,6 +73,19 @@ where
         socket_path.display(),
         CONNECT_TIMEOUT.as_secs()
     )))
+}
+
+fn spawn_daemon(bin: &Path) -> Result<(), ClientError> {
+    let mut cmd = Command::new(bin);
+    cmd.arg("daemon")
+        .arg("start")
+        .arg("--detach")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    cmd.spawn()
+        .map(|_| ())
+        .map_err(|err| ClientError::NoDaemon(format!("spawn daemon failed: {err}")))
 }
 
 /// Connect-only (no auto-spawn). Used when the caller has already ensured the

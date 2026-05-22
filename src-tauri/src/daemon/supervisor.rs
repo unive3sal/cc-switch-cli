@@ -943,6 +943,8 @@ mod tests {
         old_home: Option<OsString>,
         old_userprofile: Option<OsString>,
         old_config_dir: Option<OsString>,
+        old_claude_config_dir: Option<OsString>,
+        old_codex_home: Option<OsString>,
     }
 
     impl TestHomeEnvGuard {
@@ -951,9 +953,13 @@ mod tests {
             let old_home = std::env::var_os("HOME");
             let old_userprofile = std::env::var_os("USERPROFILE");
             let old_config_dir = std::env::var_os("CC_SWITCH_CONFIG_DIR");
+            let old_claude_config_dir = std::env::var_os("CLAUDE_CONFIG_DIR");
+            let old_codex_home = std::env::var_os("CODEX_HOME");
             std::env::set_var("HOME", home);
             std::env::set_var("USERPROFILE", home);
             std::env::set_var("CC_SWITCH_CONFIG_DIR", home.join(".cc-switch"));
+            std::env::set_var("CLAUDE_CONFIG_DIR", home.join(".claude"));
+            std::env::set_var("CODEX_HOME", home.join(".codex"));
             set_test_home_override(Some(home));
             crate::settings::reload_test_settings();
             Self {
@@ -961,6 +967,8 @@ mod tests {
                 old_home,
                 old_userprofile,
                 old_config_dir,
+                old_claude_config_dir,
+                old_codex_home,
             }
         }
     }
@@ -978,6 +986,14 @@ mod tests {
             match &self.old_config_dir {
                 Some(value) => std::env::set_var("CC_SWITCH_CONFIG_DIR", value),
                 None => std::env::remove_var("CC_SWITCH_CONFIG_DIR"),
+            }
+            match &self.old_claude_config_dir {
+                Some(value) => std::env::set_var("CLAUDE_CONFIG_DIR", value),
+                None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+            }
+            match &self.old_codex_home {
+                Some(value) => std::env::set_var("CODEX_HOME", value),
+                None => std::env::remove_var("CODEX_HOME"),
             }
             set_test_home_override(self.old_home.as_deref().map(Path::new));
             crate::settings::reload_test_settings();
@@ -997,6 +1013,8 @@ mod tests {
     async fn ensure_worker_validation_failure_does_not_start_worker_or_write_session() {
         let temp_home = tempfile::tempdir().expect("create temp home");
         let _env = TestHomeEnvGuard::set(temp_home.path());
+        crate::settings::set_current_provider(&AppType::Claude, None)
+            .expect("clear local current provider");
         let db = Arc::new(Database::memory().expect("create database"));
         let supervisor = supervisor_for_test(db.clone(), temp_home.path());
 
