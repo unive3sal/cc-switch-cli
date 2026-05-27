@@ -421,6 +421,7 @@ impl ProviderService {
         }
     }
 
+    #[allow(dead_code)]
     fn parse_common_opencode_config_snippet(snippet: &str) -> Result<Value, AppError> {
         let value: Value = serde_json::from_str(snippet).map_err(|e| {
             AppError::localized(

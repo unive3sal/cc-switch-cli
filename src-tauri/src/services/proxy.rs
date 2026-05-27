@@ -86,6 +86,7 @@ impl PersistedProxyRuntimeSessionKind {
         }
     }
 
+    #[cfg(test)]
     fn as_env_value(&self) -> &'static str {
         match self {
             Self::Foreground => "foreground",
@@ -2624,6 +2625,7 @@ impl ProxyService {
         false
     }
 
+    #[cfg(test)]
     async fn managed_session_ready_info(
         &self,
         child_pid: u32,
@@ -2758,6 +2760,7 @@ impl ProxyService {
         }
     }
 
+    #[allow(dead_code)]
     fn spawn_managed_child_reaper(mut child: std::process::Child) {
         tokio::task::spawn_blocking(move || {
             let _ = child.wait();

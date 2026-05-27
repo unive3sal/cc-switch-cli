@@ -210,6 +210,7 @@ pub struct ConfigSnapshot {
     pub common_snippets: CommonConfigSnippets,
     pub webdav_sync: Option<crate::settings::WebDavSyncSettings>,
     pub openclaw_config_path: Option<PathBuf>,
+    #[allow(dead_code)]
     pub openclaw_config_dir: Option<PathBuf>,
     pub openclaw_env: Option<OpenClawEnvConfig>,
     pub openclaw_tools: Option<OpenClawToolsConfig>,
@@ -266,6 +267,7 @@ pub struct SkillsSnapshot {
 
 #[derive(Debug, Clone, Default)]
 pub struct ProxyTargetSnapshot {
+    #[allow(dead_code)]
     pub provider_name: String,
 }
 
@@ -274,23 +276,29 @@ pub struct ProxySnapshot {
     pub enabled: bool,
     pub running: bool,
     pub managed_runtime: bool,
+    #[allow(dead_code)]
     pub active_worker_apps: HashSet<String>,
     pub auto_failover_enabled: bool,
     pub claude_takeover: bool,
     pub codex_takeover: bool,
     pub gemini_takeover: bool,
+    #[allow(dead_code)]
     pub default_cost_multiplier: Option<String>,
     pub configured_listen_address: String,
     pub configured_listen_port: u16,
     pub listen_address: String,
     pub listen_port: u16,
     pub uptime_seconds: u64,
+    #[allow(dead_code)]
     pub total_requests: u64,
     pub estimated_input_tokens_total: u64,
     pub estimated_output_tokens_total: u64,
+    #[allow(dead_code)]
     pub success_rate: Option<f32>,
+    #[allow(dead_code)]
     pub current_provider: Option<String>,
     pub last_error: Option<String>,
+    #[allow(dead_code)]
     pub current_app_target: Option<ProxyTargetSnapshot>,
 }
 
