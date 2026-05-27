@@ -90,10 +90,9 @@ impl ProviderService {
         root.remove("model_provider");
         // Legacy/alt formats might use a top-level base_url.
         root.remove("base_url");
-        // Profiles can carry provider-specific model_provider overrides. Keep them
-        // in the provider snapshot so storage normalization can restore ids.
+        // Profiles can carry provider-specific model_provider overrides. Keep
+        // unrelated profile settings in the common config snippet.
         root.remove("profile");
-        root.remove("profiles");
         // Remove entire model_providers table (provider-specific configuration)
         root.remove("model_providers");
 

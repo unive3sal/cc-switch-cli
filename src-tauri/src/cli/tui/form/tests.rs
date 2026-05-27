@@ -2096,11 +2096,11 @@ fn provider_add_form_disabling_common_config_preserves_provider_specific_env_key
 }
 
 #[test]
-fn provider_add_form_opencode_only_adds_aicodemirror_beyond_custom() {
+fn provider_add_form_opencode_exposes_supported_templates() {
     let form = ProviderAddFormState::new(AppType::OpenCode);
     let labels = form.template_labels();
 
-    assert_eq!(labels, vec!["Custom", "* AICodeMirror"]);
+    assert_eq!(labels, vec!["Custom", "* AICodeMirror", "* Cubence"]);
 }
 
 #[test]
@@ -2111,7 +2111,10 @@ fn provider_add_form_openclaw_uses_dedicated_template_defs() {
         super::provider_templates::provider_builtin_template_defs(&AppType::OpenCode);
     let openclaw_labels = ProviderAddFormState::new(AppType::OpenClaw).template_labels();
 
-    assert_eq!(openclaw_labels, vec!["Custom", "* AICodeMirror"]);
+    assert_eq!(
+        openclaw_labels,
+        vec!["Custom", "* AICodeMirror", "* Cubence"]
+    );
     assert!(
         !std::ptr::eq(openclaw_defs, opencode_defs),
         "OpenClaw should keep its own template mapping instead of aliasing OpenCode"

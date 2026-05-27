@@ -1,4 +1,5 @@
-use std::{env, ffi::OsString, sync::atomic::Ordering, time::Duration};
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use serde_json::json;
@@ -17,30 +18,6 @@ use crate::{
     services::CodexOAuthService,
     test_support::lock_test_home_and_settings,
 };
-
-struct ConfigDirEnvGuard {
-    original: Option<OsString>,
-}
-
-impl ConfigDirEnvGuard {
-    fn set(value: Option<&str>) -> Self {
-        let original = env::var_os("CC_SWITCH_CONFIG_DIR");
-        match value {
-            Some(value) => unsafe { env::set_var("CC_SWITCH_CONFIG_DIR", value) },
-            None => unsafe { env::remove_var("CC_SWITCH_CONFIG_DIR") },
-        }
-        Self { original }
-    }
-}
-
-impl Drop for ConfigDirEnvGuard {
-    fn drop(&mut self) {
-        match self.original.as_ref() {
-            Some(value) => unsafe { env::set_var("CC_SWITCH_CONFIG_DIR", value) },
-            None => unsafe { env::remove_var("CC_SWITCH_CONFIG_DIR") },
-        }
-    }
-}
 
 #[tokio::test]
 async fn bedrock_claude_prepare_request_injects_optimizer_and_cache_breakpoints() {
@@ -245,10 +222,7 @@ async fn non_claude_prepare_request_skips_claude_specific_headers() {
 #[tokio::test]
 async fn codex_oauth_prepare_request_injects_bound_account_headers() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CodexOAuthService::reset_for_tests();
-    CodexOAuthService::seed_account_for_tests(
+    let _manager = CodexOAuthService::test_manager_with_account(
         "acc-bound",
         "rt-bound",
         Some("bound@example.com"),
@@ -281,10 +255,7 @@ async fn codex_oauth_prepare_request_injects_bound_account_headers() {
 #[tokio::test]
 async fn codex_oauth_prepare_request_injects_client_session_headers() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CodexOAuthService::reset_for_tests();
-    CodexOAuthService::seed_account_for_tests(
+    let _manager = CodexOAuthService::test_manager_with_account(
         "acc-session",
         "rt-session",
         Some("session@example.com"),
@@ -336,10 +307,7 @@ async fn codex_oauth_prepare_request_injects_client_session_headers() {
 #[tokio::test]
 async fn codex_oauth_prepare_request_skips_generated_session_headers() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CodexOAuthService::reset_for_tests();
-    CodexOAuthService::seed_account_for_tests(
+    let _manager = CodexOAuthService::test_manager_with_account(
         "acc-generated",
         "rt-generated",
         Some("generated@example.com"),
@@ -380,10 +348,7 @@ async fn codex_oauth_prepare_request_skips_generated_session_headers() {
 #[tokio::test]
 async fn codex_oauth_prepare_request_falls_back_to_default_account() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CodexOAuthService::reset_for_tests();
-    CodexOAuthService::seed_account_for_tests(
+    let _manager = CodexOAuthService::test_manager_with_account(
         "acc-default",
         "rt-default",
         Some("default@example.com"),
@@ -409,9 +374,9 @@ async fn codex_oauth_prepare_request_falls_back_to_default_account() {
 #[tokio::test]
 async fn codex_oauth_prepare_request_errors_without_available_account() {
     let _lock = lock_test_home_and_settings();
-    let temp = tempfile::tempdir().expect("create temp dir");
-    let _guard = ConfigDirEnvGuard::set(Some(temp.path().to_string_lossy().as_ref()));
-    CodexOAuthService::reset_for_tests();
+    let _manager = CodexOAuthService::test_empty_manager()
+        .await
+        .expect("create empty oauth manager");
 
     let (_db, router) = test_router().await;
     let forwarder = RequestForwarder::new(router).expect("create forwarder");

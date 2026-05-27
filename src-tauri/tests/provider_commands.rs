@@ -1025,17 +1025,11 @@ async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_
     let state = state_from_config(config);
     state.save().expect("persist provider state to db");
 
-    let mut proxy_config = state
-        .proxy_service
-        .get_config()
-        .await
-        .expect("read proxy config");
-    proxy_config.listen_port = find_free_port();
+    let proxy_port = find_free_port();
     state
-        .proxy_service
-        .update_config(&proxy_config)
-        .await
-        .expect("update proxy config");
+        .db
+        .set_app_proxy_preferred_port("claude", proxy_port)
+        .expect("update claude proxy port");
 
     state
         .proxy_service
@@ -1053,7 +1047,7 @@ async fn switch_provider_under_takeover_keeps_claude_live_pointing_to_proxy_and_
             .get("env")
             .and_then(|env| env.get("ANTHROPIC_BASE_URL"))
             .and_then(|value| value.as_str()),
-        Some(format!("http://127.0.0.1:{}", proxy_config.listen_port).as_str()),
+        Some(format!("http://127.0.0.1:{proxy_port}").as_str()),
         "provider switch under takeover should keep Claude live config pointed at the local proxy"
     );
     assert_eq!(

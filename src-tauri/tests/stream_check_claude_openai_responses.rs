@@ -170,7 +170,7 @@ async fn stream_check_openclaw_returns_unsupported_before_auth_extraction() {
     .expect_err("OpenClaw stream check should be rejected as unsupported");
 
     assert!(
-        err.to_string().contains("OpenClaw 暂不支持流式检查"),
+        err.to_string().contains("openclaw 暂不支持流式检查"),
         "unexpected error: {err}"
     );
 }

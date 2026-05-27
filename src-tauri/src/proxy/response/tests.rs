@@ -162,10 +162,15 @@ async fn non_success_standard_json_errors_can_still_transform() {
     .expect("standard upstream json errors should still transform");
 
     assert_eq!(prepared.response.status(), StatusCode::BAD_REQUEST);
+    let body = buffered_body(prepared.response).await;
     assert_eq!(
-        buffered_body(prepared.response).await,
-        Bytes::from_static(
-            br#"{"error":{"message":"upstream rejected the request","type":"invalid_request_error"},"type":"error"}"#,
-        )
+        serde_json::from_slice::<serde_json::Value>(&body).expect("parse transformed response"),
+        json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "upstream rejected the request"
+            }
+        })
     );
 }
