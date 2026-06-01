@@ -52,7 +52,7 @@ pub enum Commands {
     #[command(subcommand)]
     Mcp(commands::mcp::McpCommand),
 
-    /// Manage prompts (list, activate, create, rename, edit)
+    /// Manage prompts (list, current, live, import, activate, create, rename, edit)
     #[command(subcommand)]
     Prompts(commands::prompts::PromptsCommand),
 
@@ -694,6 +694,26 @@ mod tests {
 
         assert!(help.contains("Native Codex CLI arguments to pass through after `--`"));
         assert!(help.contains("cc-switch start codex demo -- --model gpt-5.4"));
+    }
+
+    #[test]
+    fn parses_prompts_live_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "prompts", "live"]);
+
+        match cli.command {
+            Some(Commands::Prompts(super::commands::prompts::PromptsCommand::Live)) => {}
+            _ => panic!("expected prompts live command"),
+        }
+    }
+
+    #[test]
+    fn parses_prompts_import_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "prompts", "import"]);
+
+        match cli.command {
+            Some(Commands::Prompts(super::commands::prompts::PromptsCommand::Import)) => {}
+            _ => panic!("expected prompts import command"),
+        }
     }
 
     #[test]
