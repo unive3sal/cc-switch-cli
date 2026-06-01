@@ -7,7 +7,12 @@ use std::net::TcpListener;
 use cc_switch_lib::{
     get_claude_settings_path, get_codex_auth_path, get_codex_config_path, read_json_file,
     update_settings, write_codex_live_atomic, AppSettings, AppType, McpApps, McpServer,
-    MultiAppConfig, Provider, ProviderMeta, ProviderService,
+    MultiAppConfig, Provider, ProviderMeta, ProviderService, UsageScript,
+};
+
+use cc_switch_lib::cli::commands::provider::ProviderCommand;
+use cc_switch_lib::cli::commands::provider_usage_query::{
+    ProviderUsageQueryCommand, ProviderUsageQuerySetCommand, UsageQueryTemplate,
 };
 
 #[path = "support.rs"]
@@ -44,9 +49,357 @@ fn configure_live_dirs(
     (opencode_dir, hermes_dir, openclaw_dir)
 }
 
-fn provider_command(cmd: cc_switch_lib::cli::commands::provider::ProviderCommand, app: AppType) {
+fn provider_command(cmd: ProviderCommand, app: AppType) {
     cc_switch_lib::cli::commands::provider::execute(cmd, Some(app))
         .expect("provider command should succeed");
+}
+
+fn provider_command_result(
+    cmd: ProviderCommand,
+    app: AppType,
+) -> Result<(), cc_switch_lib::AppError> {
+    cc_switch_lib::cli::commands::provider::execute(cmd, Some(app))
+}
+
+fn usage_query_set_command(
+    id: &str,
+    template: Option<UsageQueryTemplate>,
+) -> ProviderUsageQuerySetCommand {
+    ProviderUsageQuerySetCommand {
+        id: id.to_string(),
+        enabled: false,
+        disabled: false,
+        template,
+        code: None,
+        timeout: None,
+        auto_query_interval: None,
+        api_key: None,
+        base_url: None,
+        access_token: None,
+        user_id: None,
+    }
+}
+
+fn saved_provider(app_type: AppType, id: &str) -> Provider {
+    let refreshed = cc_switch_lib::AppState::try_new().expect("reload provider state");
+    let config = refreshed.config.read().expect("lock provider state");
+    config
+        .get_manager(&app_type)
+        .expect("provider manager")
+        .providers
+        .get(id)
+        .cloned()
+        .expect("saved provider")
+}
+
+fn usage_script_fixture() -> UsageScript {
+    UsageScript {
+        enabled: true,
+        language: "javascript".to_string(),
+        code: "return { remaining: 1, unit: 'USD' };".to_string(),
+        timeout: Some(9),
+        api_key: Some("sk-old".to_string()),
+        base_url: Some("https://old.example.com".to_string()),
+        access_token: None,
+        user_id: None,
+        template_type: Some("general".to_string()),
+        auto_query_interval: Some(30),
+        coding_plan_provider: None,
+    }
+}
+
+#[test]
+#[serial]
+fn provider_usage_query_set_writes_upstream_defaults_and_preserves_meta() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "demo".to_string();
+        let mut provider = Provider::with_id(
+            "demo".to_string(),
+            "Demo".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_API_KEY": "sk-provider"
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            apply_common_config: Some(true),
+            endpoint_auto_select: Some(true),
+            ..Default::default()
+        });
+        manager.providers.insert("demo".to_string(), provider);
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist test providers");
+    drop(state);
+
+    let mut command = usage_query_set_command("demo", Some(UsageQueryTemplate::General));
+    command.enabled = true;
+    command.api_key = Some("  sk-usage  ".to_string());
+    command.base_url = Some("  https://usage.example.com  ".to_string());
+    command.auto_query_interval = Some(1441);
+
+    provider_command(
+        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Set(command)),
+        AppType::Claude,
+    );
+
+    let provider = saved_provider(AppType::Claude, "demo");
+    let meta = provider.meta.expect("usage query should keep meta");
+    assert_eq!(meta.apply_common_config, Some(true));
+    assert_eq!(meta.endpoint_auto_select, Some(true));
+
+    let script = meta.usage_script.expect("usage query should be saved");
+    assert!(script.enabled);
+    assert_eq!(script.language, "javascript");
+    assert_eq!(script.template_type.as_deref(), Some("general"));
+    assert_eq!(script.timeout, Some(10));
+    assert_eq!(script.auto_query_interval, Some(1440));
+    assert_eq!(script.api_key.as_deref(), Some("sk-usage"));
+    assert_eq!(
+        script.base_url.as_deref(),
+        Some("https://usage.example.com")
+    );
+    assert_eq!(script.access_token, None);
+    assert_eq!(script.user_id, None);
+    assert_eq!(script.coding_plan_provider, None);
+    assert!(script.code.contains("{{baseUrl}}/user/balance"));
+    assert!(script.code.contains("{{apiKey}}"));
+}
+
+#[test]
+#[serial]
+fn provider_usage_query_set_newapi_clears_general_credentials() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "demo".to_string();
+        let mut provider = Provider::with_id(
+            "demo".to_string(),
+            "Demo".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_API_KEY": "sk-provider"
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            apply_common_config: Some(false),
+            usage_script: Some(usage_script_fixture()),
+            ..Default::default()
+        });
+        manager.providers.insert("demo".to_string(), provider);
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist test providers");
+    drop(state);
+
+    let mut command = usage_query_set_command("demo", Some(UsageQueryTemplate::Newapi));
+    command.base_url = Some("https://newapi.example.com".to_string());
+    command.access_token = Some("token-demo".to_string());
+    command.user_id = Some("user-demo".to_string());
+
+    provider_command(
+        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Set(command)),
+        AppType::Claude,
+    );
+
+    let provider = saved_provider(AppType::Claude, "demo");
+    let meta = provider.meta.expect("usage query should keep meta");
+    assert_eq!(meta.apply_common_config, Some(false));
+
+    let script = meta.usage_script.expect("usage query should be saved");
+    assert!(script.enabled);
+    assert_eq!(script.template_type.as_deref(), Some("newapi"));
+    assert_eq!(script.timeout, Some(9));
+    assert_eq!(script.auto_query_interval, Some(30));
+    assert_eq!(script.api_key, None);
+    assert_eq!(
+        script.base_url.as_deref(),
+        Some("https://newapi.example.com")
+    );
+    assert_eq!(script.access_token.as_deref(), Some("token-demo"));
+    assert_eq!(script.user_id.as_deref(), Some("user-demo"));
+    assert!(script.code.contains("{{accessToken}}"));
+}
+
+#[test]
+#[serial]
+fn provider_usage_query_clear_removes_only_usage_script() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "demo".to_string();
+        let mut provider = Provider::with_id(
+            "demo".to_string(),
+            "Demo".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_API_KEY": "sk-provider"
+                }
+            }),
+            None,
+        );
+        provider.meta = Some(ProviderMeta {
+            apply_common_config: Some(true),
+            endpoint_auto_select: Some(true),
+            usage_script: Some(usage_script_fixture()),
+            ..Default::default()
+        });
+        manager.providers.insert("demo".to_string(), provider);
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist test providers");
+    drop(state);
+
+    provider_command(
+        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Clear {
+            id: "demo".to_string(),
+        }),
+        AppType::Claude,
+    );
+
+    let provider = saved_provider(AppType::Claude, "demo");
+    let meta = provider.meta.expect("meta should remain");
+    assert_eq!(meta.apply_common_config, Some(true));
+    assert_eq!(meta.endpoint_auto_select, Some(true));
+    assert!(meta.usage_script.is_none());
+}
+
+#[test]
+#[serial]
+fn provider_usage_query_set_defaults_to_balance_template_from_provider_url() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "demo".to_string();
+        manager.providers.insert(
+            "demo".to_string(),
+            Provider::with_id(
+                "demo".to_string(),
+                "Demo".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_API_KEY": "sk-provider",
+                        "ANTHROPIC_BASE_URL": "https://openrouter.ai/api/v1"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist test providers");
+    drop(state);
+
+    let mut command = usage_query_set_command("demo", None);
+    command.enabled = true;
+
+    provider_command(
+        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Set(command)),
+        AppType::Claude,
+    );
+
+    let provider = saved_provider(AppType::Claude, "demo");
+    let script = provider
+        .meta
+        .and_then(|meta| meta.usage_script)
+        .expect("usage query should be saved");
+    assert!(script.enabled);
+    assert_eq!(script.template_type.as_deref(), Some("balance"));
+    assert_eq!(script.timeout, Some(10));
+    assert_eq!(script.auto_query_interval, Some(5));
+    assert!(script.code.is_empty());
+    assert_eq!(script.api_key, None);
+    assert_eq!(script.base_url, None);
+    assert_eq!(script.access_token, None);
+    assert_eq!(script.user_id, None);
+}
+
+#[test]
+#[serial]
+fn provider_usage_query_set_rejects_enabled_script_without_return() {
+    let _guard = lock_test_mutex();
+    reset_test_fs();
+    ensure_test_home();
+
+    let mut config = MultiAppConfig::default();
+    {
+        let manager = config
+            .get_manager_mut(&AppType::Claude)
+            .expect("claude manager");
+        manager.current = "demo".to_string();
+        manager.providers.insert(
+            "demo".to_string(),
+            Provider::with_id(
+                "demo".to_string(),
+                "Demo".to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_API_KEY": "sk-provider"
+                    }
+                }),
+                None,
+            ),
+        );
+    }
+
+    let state = state_from_config(config);
+    state.save().expect("persist test providers");
+    drop(state);
+
+    let mut command = usage_query_set_command("demo", Some(UsageQueryTemplate::Custom));
+    command.enabled = true;
+    command.code = Some("({ request: { url: 'https://usage.example.com' } })".to_string());
+
+    let err = provider_command_result(
+        ProviderCommand::UsageQuery(ProviderUsageQueryCommand::Set(command)),
+        AppType::Claude,
+    )
+    .expect_err("enabled script without return should be rejected");
+
+    assert!(
+        err.to_string().contains("return"),
+        "error should explain the missing return statement: {err}"
+    );
+
+    let provider = saved_provider(AppType::Claude, "demo");
+    assert!(
+        provider.meta.and_then(|meta| meta.usage_script).is_none(),
+        "invalid Usage Query config must not be persisted"
+    );
 }
 
 #[test]

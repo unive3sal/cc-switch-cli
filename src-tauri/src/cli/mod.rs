@@ -777,6 +777,88 @@ mod tests {
     }
 
     #[test]
+    fn parses_provider_usage_query_show_json_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "provider",
+            "usage-query",
+            "show",
+            "demo",
+            "--json",
+        ]);
+
+        match cli.command {
+            Some(Commands::Provider(super::commands::provider::ProviderCommand::UsageQuery(
+                super::commands::provider_usage_query::ProviderUsageQueryCommand::Show { id, json },
+            ))) => {
+                assert_eq!(id, "demo");
+                assert!(json);
+            }
+            _ => panic!("expected provider usage-query show command"),
+        }
+    }
+
+    #[test]
+    fn parses_provider_usage_query_set_subcommand() {
+        let cli = Cli::parse_from([
+            "cc-switch",
+            "provider",
+            "usage-query",
+            "set",
+            "demo",
+            "--enabled",
+            "--template",
+            "newapi",
+            "--timeout",
+            "12",
+            "--auto-query-interval",
+            "1441",
+            "--base-url",
+            "https://usage.example.com",
+            "--access-token",
+            "token-demo",
+            "--user-id",
+            "user-demo",
+        ]);
+
+        match cli.command {
+            Some(Commands::Provider(super::commands::provider::ProviderCommand::UsageQuery(
+                super::commands::provider_usage_query::ProviderUsageQueryCommand::Set(command),
+            ))) => {
+                assert_eq!(command.id, "demo");
+                assert!(command.enabled);
+                assert_eq!(
+                    command.template,
+                    Some(super::commands::provider_usage_query::UsageQueryTemplate::Newapi)
+                );
+                assert_eq!(command.timeout, Some(12));
+                assert_eq!(command.auto_query_interval, Some(1441));
+                assert_eq!(
+                    command.base_url.as_deref(),
+                    Some("https://usage.example.com")
+                );
+                assert_eq!(command.access_token.as_deref(), Some("token-demo"));
+                assert_eq!(command.user_id.as_deref(), Some("user-demo"));
+            }
+            _ => panic!("expected provider usage-query set command"),
+        }
+    }
+
+    #[test]
+    fn parses_provider_usage_query_clear_subcommand() {
+        let cli = Cli::parse_from(["cc-switch", "provider", "usage-query", "clear", "demo"]);
+
+        match cli.command {
+            Some(Commands::Provider(super::commands::provider::ProviderCommand::UsageQuery(
+                super::commands::provider_usage_query::ProviderUsageQueryCommand::Clear { id },
+            ))) => {
+                assert_eq!(id, "demo");
+            }
+            _ => panic!("expected provider usage-query clear command"),
+        }
+    }
+
+    #[test]
     fn parses_provider_import_live_subcommand() {
         let cli = Cli::parse_from(["cc-switch", "provider", "import-live"]);
 

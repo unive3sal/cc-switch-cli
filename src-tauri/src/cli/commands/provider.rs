@@ -1,7 +1,7 @@
 use clap::Subcommand;
 use std::path::PathBuf;
 
-use super::provider_inspect;
+use super::{provider_inspect, provider_usage_query};
 use crate::app_config::AppType;
 use crate::cli::commands::provider_input::{
     common_snippet_has_effective_config, current_timestamp, display_provider_summary,
@@ -119,6 +119,9 @@ pub enum ProviderCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Configure provider Usage Query
+    #[command(subcommand)]
+    UsageQuery(provider_usage_query::ProviderUsageQueryCommand),
     /// Export a Claude provider to a standalone settings file
     Export {
         /// Provider ID to export
@@ -156,6 +159,7 @@ pub fn execute(cmd: ProviderCommand, app: Option<AppType>) -> Result<(), AppErro
         ProviderCommand::Quota { id, json } => {
             provider_inspect::quota_provider(app_type, &id, json)
         }
+        ProviderCommand::UsageQuery(cmd) => provider_usage_query::execute(cmd, app_type),
         ProviderCommand::Export { id, output } => export_provider(app_type, &id, output),
     }
 }
