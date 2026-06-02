@@ -86,20 +86,6 @@ impl From<MemoryKindArg> for MemoryKind {
     }
 }
 
-fn ensure_hermes_dir_exists() -> Result<(), AppError> {
-    if get_hermes_dir().exists() {
-        return Ok(());
-    }
-    Err(AppError::localized(
-        "hermes.dir.missing",
-        format!("Hermes 配置目录不存在：{}", get_hermes_dir().display()),
-        format!(
-            "Hermes config dir not found: {}",
-            get_hermes_dir().display()
-        ),
-    ))
-}
-
 pub fn execute(cmd: HermesCommand) -> Result<(), AppError> {
     match cmd {
         HermesCommand::Memory(memory_cmd) => execute_memory(memory_cmd),
@@ -107,11 +93,6 @@ pub fn execute(cmd: HermesCommand) -> Result<(), AppError> {
 }
 
 fn execute_memory(cmd: MemoryCommand) -> Result<(), AppError> {
-    if matches!(&cmd, MemoryCommand::OpenDir) {
-        return open_memory_dir();
-    }
-
-    ensure_hermes_dir_exists()?;
     match cmd {
         MemoryCommand::Show { kind } => show_memory(kind.into()),
         MemoryCommand::Set { kind, content } => set_memory_cmd(kind.into(), content),
@@ -316,6 +297,10 @@ mod tests {
         fn hermes_memories_dir(&self) -> std::path::PathBuf {
             self.home.path().join(".hermes").join("memories")
         }
+
+        fn hermes_config_path(&self) -> std::path::PathBuf {
+            self.home.path().join(".hermes").join("config.yaml")
+        }
     }
 
     impl Drop for EnvGuard {
@@ -348,5 +333,57 @@ mod tests {
         execute_memory(MemoryCommand::OpenDir).expect("open Hermes memories dir");
 
         assert!(env.hermes_memories_dir().is_dir());
+    }
+
+    #[test]
+    fn hermes_memory_show_works_without_existing_hermes_dir() {
+        let env = EnvGuard::new();
+
+        execute_memory(MemoryCommand::Show {
+            kind: MemoryKindArg::Memory,
+        })
+        .expect("show Hermes memory");
+
+        assert!(!env.hermes_memories_dir().exists());
+    }
+
+    #[test]
+    fn hermes_memory_set_creates_memories_directory_without_existing_hermes_dir() {
+        let env = EnvGuard::new();
+
+        execute_memory(MemoryCommand::Set {
+            kind: MemoryKindArg::User,
+            content: Some("user profile".to_string()),
+        })
+        .expect("set Hermes user memory");
+
+        assert_eq!(
+            read_memory(MemoryKind::User).expect("read user memory"),
+            "user profile"
+        );
+        assert!(env.hermes_memories_dir().is_dir());
+    }
+
+    #[test]
+    fn hermes_memory_toggle_creates_config_without_existing_hermes_dir() {
+        let env = EnvGuard::new();
+
+        execute_memory(MemoryCommand::Disable {
+            kind: MemoryKindArg::Memory,
+        })
+        .expect("disable Hermes memory");
+
+        let limits = read_memory_limits().expect("read memory limits");
+        assert!(!limits.memory_enabled);
+        assert!(env.hermes_config_path().is_file());
+    }
+
+    #[test]
+    fn hermes_memory_limits_works_without_existing_hermes_dir() {
+        let env = EnvGuard::new();
+
+        execute_memory(MemoryCommand::Limits).expect("print Hermes limits");
+
+        assert!(!env.hermes_config_path().exists());
     }
 }
