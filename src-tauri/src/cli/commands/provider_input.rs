@@ -3394,13 +3394,29 @@ pub fn display_provider_summary(provider: &Provider, app_type: &AppType) {
                     texts::tui_claude_api_format_value(api_format)
                 );
             }
+            if is_codex_oauth {
+                let account_id = provider
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.managed_account_id_for("codex_oauth"))
+                    .unwrap_or_else(|| texts::tui_managed_accounts_follow_default().to_string());
+                println!("  {}: {}", texts::tui_label_chatgpt_account(), account_id);
+                println!(
+                    "  {}: {}",
+                    texts::tui_label_codex_fast_mode(),
+                    provider.codex_fast_mode_enabled()
+                );
+            }
             if let Some(env) = provider.settings_config.get("env") {
-                if let Some(api_key) = env.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str()) {
-                    println!(
-                        "  {}: {}",
-                        texts::api_key_display_label(),
-                        mask_api_key(api_key)
-                    );
+                if !is_codex_oauth {
+                    if let Some(api_key) = env.get("ANTHROPIC_AUTH_TOKEN").and_then(|v| v.as_str())
+                    {
+                        println!(
+                            "  {}: {}",
+                            texts::api_key_display_label(),
+                            mask_api_key(api_key)
+                        );
+                    }
                 }
                 if let Some(base_url) = env.get("ANTHROPIC_BASE_URL").and_then(|v| v.as_str()) {
                     println!("  {}: {}", texts::base_url_display_label(), base_url);

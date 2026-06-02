@@ -13,11 +13,12 @@ use crate::cli::commands::provider_input::{
 use crate::cli::i18n::texts;
 use crate::cli::ui::{highlight, info, success, warning};
 use crate::error::AppError;
-use crate::provider::{Provider, ProviderMeta};
-use crate::services::ProviderService;
+use crate::provider::{AuthBinding, AuthBindingSource, Provider, ProviderMeta};
+use crate::services::{AuthService, ManagedAuthAccount, ProviderService};
 use crate::store::AppState;
 use inquire::{Confirm, Select};
 
+const AUTH_PROVIDER_CODEX_OAUTH: &str = "codex_oauth";
 const CLAUDE_API_FORMAT_ANTHROPIC: &str = "anthropic";
 const CLAUDE_API_FORMAT_OPENAI_CHAT: &str = "openai_chat";
 const CLAUDE_API_FORMAT_OPENAI_RESPONSES: &str = "openai_responses";
@@ -196,6 +197,134 @@ fn prompt_and_apply_claude_api_format(
 
     let api_format = prompt_claude_api_format(provider)?;
     apply_claude_api_format(provider, api_format);
+    Ok(())
+}
+
+fn normalize_optional_account_id(account_id: Option<String>) -> Option<String> {
+    account_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn apply_codex_oauth_provider_options(
+    provider: &mut Provider,
+    account_id: Option<String>,
+    fast_mode: bool,
+) {
+    if !provider.settings_config.is_object() {
+        provider.settings_config = serde_json::json!({});
+    }
+    if let Some(settings_obj) = provider.settings_config.as_object_mut() {
+        let env_value = settings_obj
+            .entry("env".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if !env_value.is_object() {
+            *env_value = serde_json::json!({});
+        }
+        if let Some(env_obj) = env_value.as_object_mut() {
+            env_obj.remove("ANTHROPIC_AUTH_TOKEN");
+            env_obj.remove("ANTHROPIC_API_KEY");
+            env_obj.insert(
+                "ANTHROPIC_BASE_URL".to_string(),
+                serde_json::json!("https://chatgpt.com/backend-api/codex"),
+            );
+        }
+    }
+
+    let account_id = normalize_optional_account_id(account_id);
+    let meta = provider.meta.get_or_insert_with(ProviderMeta::default);
+    meta.provider_type = Some(AUTH_PROVIDER_CODEX_OAUTH.to_string());
+    meta.api_format = Some(CLAUDE_API_FORMAT_OPENAI_RESPONSES.to_string());
+    meta.auth_binding = Some(AuthBinding {
+        source: AuthBindingSource::ManagedAccount,
+        auth_provider: Some(AUTH_PROVIDER_CODEX_OAUTH.to_string()),
+        account_id,
+    });
+    meta.codex_fast_mode = Some(fast_mode);
+}
+
+fn codex_oauth_account_id(provider: &Provider) -> Option<String> {
+    provider
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.managed_account_id_for(AUTH_PROVIDER_CODEX_OAUTH))
+}
+
+fn load_codex_oauth_accounts() -> Result<Vec<ManagedAuthAccount>, AppError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| AppError::Message(format!("failed to create async runtime: {error}")))?;
+
+    runtime
+        .block_on(AuthService::list_accounts(AUTH_PROVIDER_CODEX_OAUTH))
+        .map_err(AppError::Message)
+}
+
+fn codex_oauth_account_label(account: &ManagedAuthAccount) -> String {
+    let suffix = if account.is_default {
+        format!(", {}", texts::tui_managed_accounts_default())
+    } else {
+        String::new()
+    };
+    format!("{} ({}{suffix})", account.login, account.id)
+}
+
+fn prompt_codex_oauth_account(
+    current_account_id: Option<&str>,
+    accounts: &[ManagedAuthAccount],
+) -> Result<Option<String>, AppError> {
+    let mut choices = Vec::with_capacity(accounts.len() + 1);
+    let mut account_ids = Vec::with_capacity(accounts.len() + 1);
+    choices.push(texts::tui_managed_accounts_follow_default().to_string());
+    account_ids.push(None);
+
+    let mut default_index = 0;
+    for account in accounts {
+        if current_account_id == Some(account.id.as_str()) {
+            default_index = choices.len();
+        }
+        choices.push(codex_oauth_account_label(account));
+        account_ids.push(Some(account.id.clone()));
+    }
+
+    if let Some(account_id) = current_account_id {
+        if default_index == 0 {
+            default_index = choices.len();
+            choices.push(account_id.to_string());
+            account_ids.push(Some(account_id.to_string()));
+        }
+    }
+
+    let selected = Select::new(texts::tui_label_chatgpt_account(), choices.clone())
+        .with_starting_cursor(default_index)
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+    let selected_index = choices
+        .iter()
+        .position(|choice| choice == &selected)
+        .unwrap_or(0);
+
+    Ok(account_ids.get(selected_index).cloned().unwrap_or(None))
+}
+
+fn prompt_and_apply_codex_oauth_provider_options(
+    app_type: &AppType,
+    provider: &mut Provider,
+) -> Result<(), AppError> {
+    if !matches!(app_type, AppType::Claude) || !is_claude_codex_oauth_provider(provider) {
+        return Ok(());
+    }
+
+    let current_account_id = codex_oauth_account_id(provider);
+    let accounts = load_codex_oauth_accounts()?;
+    let account_id = prompt_codex_oauth_account(current_account_id.as_deref(), &accounts)?;
+    let fast_mode = Confirm::new(texts::tui_label_codex_fast_mode())
+        .with_default(provider.codex_fast_mode_enabled())
+        .prompt()
+        .map_err(|e| AppError::Message(texts::input_failed_error(&e.to_string())))?;
+
+    apply_codex_oauth_provider_options(provider, account_id, fast_mode);
     Ok(())
 }
 
@@ -528,6 +657,7 @@ fn add_provider(app_type: AppType, template: Option<ProviderAddTemplate>) -> Res
     provider.sort_index = optional.sort_index;
     provider.notes = optional.notes;
     prompt_and_apply_claude_api_format(&app_type, &mut provider)?;
+    prompt_and_apply_codex_oauth_provider_options(&app_type, &mut provider)?;
     if let Some(enabled) = prompt_common_config_enabled(&app_type, common_snippet.as_deref(), None)?
     {
         set_provider_common_config_meta(&mut provider, enabled);
@@ -638,6 +768,7 @@ fn edit_provider(app_type: AppType, id: &str) -> Result<(), AppError> {
         in_failover_queue: original.in_failover_queue, // 保留故障转移状态
     };
     prompt_and_apply_claude_api_format(&app_type, &mut updated)?;
+    prompt_and_apply_codex_oauth_provider_options(&app_type, &mut updated)?;
     if let Some(enabled) =
         prompt_common_config_enabled(&app_type, common_snippet.as_deref(), Some(&updated))?
     {
@@ -863,6 +994,88 @@ mod tests {
     }
 
     #[test]
+    fn codex_oauth_provider_options_write_upstream_managed_account_shape() {
+        let mut provider = claude_provider(json!({
+            "env": {
+                "ANTHROPIC_AUTH_TOKEN": "stale-token",
+                "ANTHROPIC_API_KEY": "stale-key",
+                "ANTHROPIC_BASE_URL": "https://stale.example",
+                "ANTHROPIC_MODEL": "gpt-5.4"
+            }
+        }));
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            apply_common_config: Some(true),
+            ..Default::default()
+        });
+
+        apply_codex_oauth_provider_options(&mut provider, Some(" acc-123 ".to_string()), true);
+
+        let meta = provider.meta.expect("metadata should be present");
+        assert_eq!(meta.apply_common_config, Some(true));
+        assert_eq!(meta.provider_type.as_deref(), Some("codex_oauth"));
+        assert_eq!(
+            meta.api_format.as_deref(),
+            Some(CLAUDE_API_FORMAT_OPENAI_RESPONSES)
+        );
+        assert_eq!(meta.codex_fast_mode, Some(true));
+        let binding = meta.auth_binding.expect("auth binding should be present");
+        assert_eq!(binding.source, AuthBindingSource::ManagedAccount);
+        assert_eq!(binding.auth_provider.as_deref(), Some("codex_oauth"));
+        assert_eq!(binding.account_id.as_deref(), Some("acc-123"));
+
+        let env = provider
+            .settings_config
+            .get("env")
+            .and_then(serde_json::Value::as_object)
+            .expect("env should remain an object");
+        assert!(env.get("ANTHROPIC_AUTH_TOKEN").is_none());
+        assert!(env.get("ANTHROPIC_API_KEY").is_none());
+        assert_eq!(
+            env.get("ANTHROPIC_BASE_URL")
+                .and_then(serde_json::Value::as_str),
+            Some("https://chatgpt.com/backend-api/codex")
+        );
+        assert_eq!(
+            env.get("ANTHROPIC_MODEL")
+                .and_then(serde_json::Value::as_str),
+            Some("gpt-5.4")
+        );
+    }
+
+    #[test]
+    fn codex_oauth_provider_options_blank_account_follows_default() {
+        let mut provider = claude_provider(json!({}));
+        provider.meta = Some(ProviderMeta {
+            provider_type: Some("codex_oauth".to_string()),
+            auth_binding: Some(AuthBinding {
+                source: AuthBindingSource::ManagedAccount,
+                auth_provider: Some("codex_oauth".to_string()),
+                account_id: Some("old-account".to_string()),
+            }),
+            codex_fast_mode: Some(true),
+            ..Default::default()
+        });
+
+        apply_codex_oauth_provider_options(&mut provider, Some(" \n ".to_string()), false);
+
+        let meta = provider.meta.expect("metadata should be present");
+        assert_eq!(meta.provider_type.as_deref(), Some("codex_oauth"));
+        assert_eq!(
+            meta.api_format.as_deref(),
+            Some(CLAUDE_API_FORMAT_OPENAI_RESPONSES)
+        );
+        assert_eq!(meta.codex_fast_mode, Some(false));
+        let binding = meta.auth_binding.expect("auth binding should be present");
+        assert_eq!(binding.source, AuthBindingSource::ManagedAccount);
+        assert_eq!(binding.auth_provider.as_deref(), Some("codex_oauth"));
+        assert!(
+            binding.account_id.is_none(),
+            "default-account binding should omit accountId"
+        );
+    }
+
+    #[test]
     fn duplicate_draft_matches_tui_copy_identity_defaults() {
         let mut provider = claude_provider(json!({
             "env": {
@@ -1027,6 +1240,7 @@ fn duplicate_provider_interactive(app_type: AppType, id: &str) -> Result<(), App
         in_failover_queue: false,
     };
     prompt_and_apply_claude_api_format(&app_type, &mut copied)?;
+    prompt_and_apply_codex_oauth_provider_options(&app_type, &mut copied)?;
     if let Some(enabled) =
         prompt_common_config_enabled(&app_type, common_snippet.as_deref(), Some(&copied))?
     {
