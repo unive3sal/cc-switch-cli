@@ -726,6 +726,60 @@ mod tests {
     }
 
     #[test]
+    fn cli_codex_prompt_update_preserves_settings_siblings() {
+        let current = json!({
+            "auth": {
+                "OPENAI_API_KEY": "sk-old",
+                "OTHER_TOKEN": "keep"
+            },
+            "config": r#"
+model_provider = "custom"
+model = "gpt-5.4"
+
+[model_providers.custom]
+base_url = "https://api.old.example/v1"
+wire_api = "responses"
+requires_openai_auth = true
+"#,
+            "modelCatalog": {
+                "models": [
+                    {
+                        "model": "deepseek-v4-flash",
+                        "name": "DeepSeek V4 Flash"
+                    }
+                ]
+            },
+            "unknownSibling": {
+                "keep": true
+            }
+        });
+
+        let cfg = build_codex_settings_config_from_prompt(
+            Some(&current),
+            "sk-updated",
+            "https://api.changed.example/v1",
+            "gpt-6",
+            "fallback",
+        );
+
+        assert_eq!(cfg["auth"]["OPENAI_API_KEY"], "sk-updated");
+        assert_eq!(cfg["auth"]["OTHER_TOKEN"], "keep");
+        assert_eq!(
+            cfg["modelCatalog"]["models"][0]["model"],
+            "deepseek-v4-flash"
+        );
+        assert_eq!(cfg["unknownSibling"]["keep"], true);
+
+        let config = cfg
+            .get("config")
+            .and_then(Value::as_str)
+            .expect("config should be present");
+        assert!(config.contains("model_provider = \"custom\""));
+        assert!(config.contains("model = \"gpt-6\""));
+        assert!(config.contains("base_url = \"https://api.changed.example/v1\""));
+    }
+
+    #[test]
     fn cli_gemini_api_key_settings_match_tui_env_shape() {
         let cfg = build_gemini_api_key_settings_config(
             "AIza-updated",
@@ -1727,22 +1781,33 @@ fn build_codex_settings_config_from_prompt(
         "OPENAI_API_KEY",
     );
 
-    let mut settings_obj = Map::new();
-    settings_obj.insert("config".to_string(), Value::String(config_toml));
-
-    let mut auth = current
-        .and_then(|value| value.get("auth"))
+    let mut settings_obj = current
         .and_then(Value::as_object)
         .cloned()
         .unwrap_or_default();
+    settings_obj.insert("config".to_string(), Value::String(config_toml));
+
     let api_key = api_key.trim();
     if api_key.is_empty() {
-        auth.remove("OPENAI_API_KEY");
+        if let Some(auth_obj) = settings_obj.get_mut("auth").and_then(Value::as_object_mut) {
+            auth_obj.remove("OPENAI_API_KEY");
+            if auth_obj.is_empty() {
+                settings_obj.remove("auth");
+            }
+        } else {
+            settings_obj.remove("auth");
+        }
     } else {
+        let auth_value = settings_obj
+            .entry("auth".to_string())
+            .or_insert_with(|| json!({}));
+        if !auth_value.is_object() {
+            *auth_value = json!({});
+        }
+        let auth = auth_value
+            .as_object_mut()
+            .expect("auth must be a JSON object");
         auth.insert("OPENAI_API_KEY".to_string(), json!(api_key));
-    }
-    if !auth.is_empty() {
-        settings_obj.insert("auth".to_string(), Value::Object(auth));
     }
 
     Value::Object(settings_obj)
