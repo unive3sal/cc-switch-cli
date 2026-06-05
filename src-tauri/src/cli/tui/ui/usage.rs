@@ -578,103 +578,12 @@ fn render_usage_trend(
         return;
     }
 
-    let content = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(2), Constraint::Min(0)])
-        .split(inner);
-    frame.render_widget(
-        Paragraph::new(vec![
-            usage_trend_summary_line(trend, app.usage.metric, theme),
-            usage_trend_range_line(trend, theme),
-        ])
-        .wrap(Wrap { trim: false }),
-        content[0],
-    );
-
-    let visible = fit_trend_points(trend, content[1].width);
-    if content[1].width >= 44 && content[1].height >= 7 && visible.len() >= 2 {
-        render_usage_line_chart(frame, &visible, app.usage.metric, content[1], theme);
+    let visible = fit_trend_points(trend, inner.width);
+    if inner.width >= 44 && inner.height >= 7 && !visible.is_empty() {
+        render_usage_line_chart(frame, &visible, app.usage.metric, inner, theme);
     } else {
-        render_usage_sparkline(frame, &visible, app.usage.metric, content[1], theme);
+        render_usage_sparkline(frame, &visible, app.usage.metric, inner, theme);
     }
-}
-
-fn usage_trend_summary_line(
-    trend: &[UsageTrendBucket],
-    metric: UsageMetric,
-    theme: &super::theme::Theme,
-) -> Line<'static> {
-    let latest_value = trend
-        .last()
-        .map(|bucket| usage_bucket_value(bucket, metric))
-        .unwrap_or_default();
-    let peak = trend.iter().max_by(|lhs, rhs| {
-        usage_bucket_value(lhs, metric)
-            .partial_cmp(&usage_bucket_value(rhs, metric))
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    let peak_label = peak
-        .map(|bucket| bucket.label.clone())
-        .unwrap_or_else(|| "-".to_string());
-    let peak_value = peak
-        .map(|bucket| usage_bucket_value(bucket, metric))
-        .unwrap_or_default();
-    let total = trend
-        .iter()
-        .map(|bucket| usage_bucket_value(bucket, metric))
-        .sum::<f64>();
-
-    Line::from(vec![
-        Span::styled(
-            usage_text("Latest ", "最新 "),
-            Style::default().fg(theme.dim),
-        ),
-        Span::styled(
-            format_metric_value(latest_value, metric),
-            usage_metric_style(metric, theme).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(usage_text("Peak ", "峰值 "), Style::default().fg(theme.dim)),
-        Span::styled(
-            format!("{} {}", peak_label, format_metric_value(peak_value, metric)),
-            usage_metric_style(metric, theme).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            usage_text("Total ", "总计 "),
-            Style::default().fg(theme.dim),
-        ),
-        Span::styled(
-            format_metric_value(total, metric),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ])
-}
-
-fn usage_trend_range_line(
-    trend: &[UsageTrendBucket],
-    theme: &super::theme::Theme,
-) -> Line<'static> {
-    let first = trend
-        .first()
-        .map(|bucket| bucket.label.clone())
-        .unwrap_or_else(|| "-".to_string());
-    let last = trend
-        .last()
-        .map(|bucket| bucket.label.clone())
-        .unwrap_or_else(|| "-".to_string());
-    Line::from(vec![
-        Span::styled(
-            usage_text("Range ", "区间 "),
-            Style::default().fg(theme.dim),
-        ),
-        Span::styled(
-            format!("{first} -> {last}"),
-            Style::default().fg(theme.comment),
-        ),
-    ])
 }
 
 fn render_usage_line_chart(
@@ -761,30 +670,14 @@ fn render_usage_sparkline(
         .iter()
         .map(|bucket| usage_bucket_value(bucket, metric))
         .collect::<Vec<_>>();
-    let first = buckets
-        .first()
-        .map(|bucket| bucket.label.clone())
-        .unwrap_or_else(|| "-".to_string());
-    let last = buckets
-        .last()
-        .map(|bucket| bucket.label.clone())
-        .unwrap_or_else(|| "-".to_string());
-    let latest = values.last().copied().unwrap_or_default();
-    let lines = vec![
-        Line::styled(
+    frame.render_widget(
+        Paragraph::new(Line::styled(
             usage_sparkline(&values),
             usage_metric_style(metric, theme).add_modifier(Modifier::BOLD),
-        ),
-        Line::from(vec![
-            Span::styled(format!("{first} -> {last}"), Style::default().fg(theme.dim)),
-            Span::raw("  "),
-            Span::styled(
-                format_metric_value(latest, metric),
-                usage_metric_style(metric, theme),
-            ),
-        ]),
-    ];
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+        ))
+        .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 fn render_usage_detail_tabs(

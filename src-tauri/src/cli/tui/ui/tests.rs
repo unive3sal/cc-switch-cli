@@ -175,7 +175,48 @@ fn tui_usage_renders_summary_and_trend() {
     assert!(all.contains("Cache Hit"), "{all}");
     assert!(all.contains("19%"), "{all}");
     assert!(all.contains("06/05"), "{all}");
+    assert!(!all.contains("Latest"), "{all}");
+    assert!(!all.contains("Peak"), "{all}");
+    assert!(!all.contains("Total"), "{all}");
+    assert!(!all.contains("Range"), "{all}");
     assert!(!all.contains("Demo Provider"), "{all}");
+}
+
+#[test]
+fn tui_usage_compact_trend_omits_text_summary() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    let mut data = minimal_data(&app.app_type);
+    data.usage.trends_7d = vec![
+        UsageTrendBucket {
+            key: "2026-06-04".to_string(),
+            label: "06/04".to_string(),
+            request_count: 2,
+            total_tokens: 800,
+            total_cost_usd: 0.5,
+            error_count: 0,
+        },
+        UsageTrendBucket {
+            key: "2026-06-05".to_string(),
+            label: "06/05".to_string(),
+            request_count: 4,
+            total_tokens: 1_800,
+            total_cost_usd: 1.25,
+            error_count: 1,
+        },
+    ];
+
+    let all = all_text(&render_with_size(&app, &data, 80, 24));
+
+    assert!(all.contains("Usage Trend"), "{all}");
+    assert!(!all.contains("Latest"), "{all}");
+    assert!(!all.contains("Peak"), "{all}");
+    assert!(!all.contains("Total"), "{all}");
+    assert!(!all.contains("Range"), "{all}");
+    assert!(!all.contains("06/04 -> 06/05"), "{all}");
 }
 
 #[test]
