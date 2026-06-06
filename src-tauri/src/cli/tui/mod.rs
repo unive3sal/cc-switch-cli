@@ -447,6 +447,7 @@ impl UiDataByAppCache {
         range: data::UsageRangePreset,
     ) {
         if matches!(range, data::UsageRangePreset::Custom(_)) {
+            app.usage.clear_custom_loading_for_app(app_type);
             self.pending_usage_pricing_by_key
                 .retain(|(cached_app_type, cached_range), _| {
                     cached_app_type != app_type
@@ -461,6 +462,7 @@ impl UiDataByAppCache {
 
         let key = (app_type.clone(), range);
         if self.pending_usage_pricing_by_key.contains_key(&key) {
+            app.usage.start_loading(app_type.clone(), range);
             return;
         }
 
@@ -497,6 +499,8 @@ impl UiDataByAppCache {
                 format!("Usage/pricing refresh request failed: {err}"),
                 ToastKind::Warning,
             );
+        } else {
+            app.usage.start_loading(app_type.clone(), range);
         }
     }
 
@@ -593,6 +597,7 @@ fn handle_usage_pricing_msg(
             ) {
                 return;
             }
+            app.usage.finish_loading(&app_type, range);
 
             match result {
                 Ok(usage_pricing) => {
@@ -851,6 +856,10 @@ fn apply_cache_invalidation(
     } else {
         None
     };
+
+    if !matches!(invalidation, CacheInvalidation::None) {
+        app.usage.clear_loading();
+    }
 
     data_cache.handle_data_reloaded(app, data, invalidation);
     if !matches!(invalidation, CacheInvalidation::None) {

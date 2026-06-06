@@ -464,6 +464,58 @@ fn usage_pricing_results_are_tracked_per_app() {
 }
 
 #[test]
+fn usage_pricing_load_updates_non_blocking_loading_state() {
+    let mut app = App::new(Some(AppType::Claude));
+    let mut data = UiData::default();
+    let mut cache = UiDataByAppCache::default();
+    let (tx, rx) = mpsc::channel();
+
+    cache.queue_usage_pricing_load(
+        &mut app,
+        Some(&tx),
+        &AppType::Claude,
+        data::UsageRangePreset::SevenDays,
+    );
+
+    assert!(app
+        .usage
+        .is_loading_for(&AppType::Claude, data::UsageRangePreset::Today));
+    assert!(app
+        .usage
+        .is_loading_for(&AppType::Claude, data::UsageRangePreset::SevenDays));
+    assert!(!app
+        .usage
+        .is_loading_for(&AppType::Codex, data::UsageRangePreset::SevenDays));
+    assert!(matches!(
+        rx.recv().expect("usage/pricing request should be queued"),
+        UsagePricingReq::Load {
+            request_id: 1,
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::SevenDays,
+            ..
+        }
+    ));
+
+    handle_usage_pricing_msg(
+        &mut app,
+        &mut data,
+        &mut cache,
+        UsagePricingMsg::Loaded {
+            request_id: 1,
+            generation: 0,
+            app_state_epoch: 0,
+            app_type: AppType::Claude,
+            range: data::UsageRangePreset::SevenDays,
+            result: Ok(data::UsagePricingData::default()),
+        },
+    );
+
+    assert!(!app
+        .usage
+        .is_loading_for(&AppType::Claude, data::UsageRangePreset::SevenDays));
+}
+
+#[test]
 fn usage_custom_range_action_queues_range_specific_load() {
     let mut terminal = TuiTerminal::new_for_test().expect("create terminal");
     let mut app = App::new(Some(AppType::Claude));

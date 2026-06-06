@@ -149,13 +149,18 @@ fn render_usage_metrics(
     area: Rect,
     theme: &super::theme::Theme,
 ) {
-    let summary = data.usage.summary_for(app.usage.range);
     if area.width < 16 || area.height == 0 {
         return;
     }
+    let loading = current_usage_is_loading(app, data);
 
     if area.width < 36 || area.height < 4 {
-        render_usage_metrics_untitled_compact(frame, summary, area, theme);
+        if loading {
+            render_usage_loading(frame, area, theme);
+        } else {
+            let summary = data.usage.summary_for(app.usage.range);
+            render_usage_metrics_untitled_compact(frame, summary, area, theme);
+        }
         return;
     }
 
@@ -167,12 +172,23 @@ fn render_usage_metrics(
     let block_inner = block.inner(area);
     let inner = inset_horizontal(block_inner, CONTENT_INSET_LEFT, CONTENT_INSET_LEFT);
     if inner.width < 20 || inner.height == 0 {
-        render_usage_metrics_untitled_compact(frame, summary, area, theme);
+        if loading {
+            render_usage_loading(frame, area, theme);
+        } else {
+            let summary = data.usage.summary_for(app.usage.range);
+            render_usage_metrics_untitled_compact(frame, summary, area, theme);
+        }
         return;
     }
 
     frame.render_widget(block.clone(), area);
 
+    if loading {
+        render_usage_loading(frame, inner, theme);
+        return;
+    }
+
+    let summary = data.usage.summary_for(app.usage.range);
     if inner.height < 4 {
         render_usage_metrics_compact(frame, summary, inner, theme);
         return;
@@ -596,6 +612,11 @@ fn render_usage_trend(
     frame.render_widget(block.clone(), area);
     let inner = inset_horizontal(block.inner(area), CONTENT_INSET_LEFT, 4);
 
+    if current_usage_is_loading(app, data) {
+        render_usage_loading(frame, inner, theme);
+        return;
+    }
+
     let trend = data.usage.trend_for(app.usage.range);
     if trend
         .iter()
@@ -786,6 +807,7 @@ fn render_usage_detail_table(
         .title(format!(" {} ", usage_detail_pane_title(app.usage.pane)));
     frame.render_widget(block.clone(), area);
     let inner = inset_left(block.inner(area), CONTENT_INSET_LEFT);
+    let loading = current_usage_is_loading(app, data);
 
     match app.usage.pane {
         UsagePane::Models => render_usage_models_table(
@@ -794,6 +816,7 @@ fn render_usage_detail_table(
             data.usage.top_models_for(app.usage.range),
             inner,
             theme,
+            loading,
         ),
         UsagePane::Providers => render_usage_providers_table(
             frame,
@@ -801,6 +824,7 @@ fn render_usage_detail_table(
             data.usage.top_providers_for(app.usage.range),
             inner,
             theme,
+            loading,
         ),
         UsagePane::Recent => render_usage_logs_table(frame, app, data, inner, theme),
     }
@@ -812,9 +836,10 @@ fn render_usage_providers_table(
     rows: &[UsageProviderStatsRow],
     area: Rect,
     theme: &super::theme::Theme,
+    loading: bool,
 ) {
     if rows.is_empty() {
-        render_empty_table(frame, area, theme);
+        render_empty_table(frame, area, theme, loading);
         return;
     }
 
@@ -865,9 +890,10 @@ fn render_usage_models_table(
     rows: &[UsageModelStatsRow],
     area: Rect,
     theme: &super::theme::Theme,
+    loading: bool,
 ) {
     if rows.is_empty() {
-        render_empty_table(frame, area, theme);
+        render_empty_table(frame, area, theme, loading);
         return;
     }
 
@@ -918,7 +944,7 @@ fn render_usage_logs_table(
 ) {
     let logs = data.usage.recent_logs_for(app.usage.range);
     if logs.is_empty() {
-        render_empty_table(frame, area, theme);
+        render_empty_table(frame, area, theme, current_usage_is_loading(app, data));
         return;
     }
 
@@ -1123,12 +1149,33 @@ fn usage_detail_pane_title(pane: UsagePane) -> &'static str {
     }
 }
 
-fn render_empty_table(frame: &mut Frame<'_>, area: Rect, theme: &super::theme::Theme) {
+fn render_empty_table(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: &super::theme::Theme,
+    loading: bool,
+) {
+    if loading {
+        render_usage_loading(frame, area, theme);
+        return;
+    }
+
     render_centered_usage_lines(
         frame,
         area,
         vec![Line::styled(
             usage_text("No data for the selected range", "当前范围暂无数据"),
+            Style::default().fg(theme.comment),
+        )],
+    );
+}
+
+fn render_usage_loading(frame: &mut Frame<'_>, area: Rect, theme: &super::theme::Theme) {
+    render_centered_usage_lines(
+        frame,
+        area,
+        vec![Line::styled(
+            usage_text("Loading...", "正在加载中..."),
             Style::default().fg(theme.comment),
         )],
     );
@@ -1157,6 +1204,13 @@ fn detail_line(
 }
 
 fn usage_summary_line(app: &App, data: &UiData) -> String {
+    if current_usage_is_loading(app, data) {
+        if i18n::is_chinese() {
+            return format!("{} · 正在加载中...", app.usage.range.label());
+        }
+        return format!("{} · Loading...", app.usage.range.label());
+    }
+
     let summary = data.usage.summary_for(app.usage.range);
     if i18n::is_chinese() {
         format!(
@@ -1177,6 +1231,11 @@ fn usage_summary_line(app: &App, data: &UiData) -> String {
             format_ms(summary.avg_latency_ms)
         )
     }
+}
+
+fn current_usage_is_loading(app: &App, data: &UiData) -> bool {
+    app.usage.is_loading_for(&app.app_type, app.usage.range)
+        && !data.usage.has_data_for(app.usage.range)
 }
 
 fn usage_detail_summary_line(app: &App, data: &UiData) -> String {

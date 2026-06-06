@@ -111,6 +111,88 @@ fn tui_usage_empty_state_renders_dashboard_shell() {
 }
 
 #[test]
+fn tui_usage_loading_state_renders_non_blocking_placeholder() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    app.usage
+        .start_loading(AppType::Claude, UsageRangePreset::SevenDays);
+    let data = minimal_data(&app.app_type);
+
+    let all = all_text(&render_with_size(&app, &data, 160, 40));
+
+    assert!(all.contains("Usage Statistics"), "{all}");
+    assert!(all.contains("Loading..."), "{all}");
+    assert!(all.contains("Today"), "{all}");
+    assert!(all.contains("details"), "{all}");
+    assert!(!all.contains("No usage recorded"), "{all}");
+    assert!(!all.contains("No data for the selected range"), "{all}");
+}
+
+#[test]
+fn tui_usage_loading_state_ignores_shared_fixed_recent_logs() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    app.usage
+        .start_loading(AppType::Claude, UsageRangePreset::SevenDays);
+    let mut data = minimal_data(&app.app_type);
+    data.usage.recent_logs.push(UsageLogRow {
+        request_id: "old-log".to_string(),
+        created_at: 1_780_617_600,
+        app_type: "claude".to_string(),
+        provider_id: "p1".to_string(),
+        model: "claude-sonnet-4".to_string(),
+        status_code: 200,
+        ..UsageLogRow::default()
+    });
+    data.usage.logs_total = 1;
+
+    let all = all_text(&render_with_size(&app, &data, 160, 40));
+
+    assert!(all.contains("Usage Statistics"), "{all}");
+    assert!(all.contains("Loading..."), "{all}");
+    assert!(!all.contains("No usage recorded"), "{all}");
+}
+
+#[test]
+fn tui_usage_loading_state_keeps_existing_data_visible() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Usage;
+    app.focus = Focus::Content;
+    app.usage
+        .start_loading(AppType::Claude, UsageRangePreset::SevenDays);
+    let mut data = minimal_data(&app.app_type);
+    data.usage.summary_7d = UsageSummarySnapshot {
+        total_requests: 2,
+        total_cost_usd: 0.42,
+        total_tokens: 800,
+        ..UsageSummarySnapshot::default()
+    };
+    data.usage.trends_7d = vec![UsageTrendBucket {
+        key: "2026-06-05".to_string(),
+        label: "06/05".to_string(),
+        request_count: 2,
+        total_tokens: 800,
+        total_cost_usd: 0.42,
+        error_count: 0,
+    }];
+
+    let all = all_text(&render_with_size(&app, &data, 160, 40));
+
+    assert!(all.contains("$0.420"), "{all}");
+    assert!(all.contains("800"), "{all}");
+    assert!(all.contains("06/05"), "{all}");
+    assert!(!all.contains("Loading..."), "{all}");
+}
+
+#[test]
 fn tui_usage_renders_summary_and_trend() {
     let _lang = use_test_language(Language::English);
 
@@ -487,6 +569,52 @@ fn tui_pricing_renders_catalog_and_recent_usage_context() {
     assert!(all.contains("$2.00"), "{all}");
     assert!(all.contains("$8.00"), "{all}");
     assert!(all.contains("$0.420"), "{all}");
+}
+
+#[test]
+fn tui_pricing_loading_state_uses_usage_pricing_pending_signal() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Pricing;
+    app.focus = Focus::Content;
+    app.usage
+        .start_loading(AppType::Claude, UsageRangePreset::SevenDays);
+    let data = minimal_data(&app.app_type);
+
+    let all = all_text(&render_with_size(&app, &data, 160, 36));
+
+    assert!(all.contains("Model Pricing"), "{all}");
+    assert!(all.contains("Loading..."), "{all}");
+    assert!(!all.contains("No model pricing rows found"), "{all}");
+}
+
+#[test]
+fn tui_pricing_loading_state_keeps_unmatched_context_visible() {
+    let _lang = use_test_language(Language::English);
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Pricing;
+    app.focus = Focus::Content;
+    app.usage
+        .start_loading(AppType::Claude, UsageRangePreset::SevenDays);
+    let mut data = minimal_data(&app.app_type);
+    data.pricing = ModelPricingSnapshot {
+        recent_unknown_models: 1,
+        recent_unmatched_total_tokens: 500,
+        recent_unmatched_total_cost_usd: 0.12,
+        ..ModelPricingSnapshot::default()
+    };
+
+    let all = all_text(&render_with_size(&app, &data, 160, 36));
+
+    assert!(all.contains("Model Pricing"), "{all}");
+    assert!(all.contains("1 unmatched models 30d"), "{all}");
+    assert!(all.contains("500 tokens"), "{all}");
+    assert!(all.contains("$0.120 total"), "{all}");
+    assert!(all.contains("$0.120 unmatched"), "{all}");
+    assert!(all.contains("No model pricing rows found"), "{all}");
+    assert!(!all.contains("Loading..."), "{all}");
 }
 
 #[test]

@@ -65,6 +65,7 @@ pub struct UsageState {
     pub pane: UsagePane,
     pub selected_idx: usize,
     pub logs_idx: usize,
+    loading_ranges: HashSet<(AppType, crate::cli::tui::data::UsageRangePreset)>,
 }
 
 impl Default for UsageState {
@@ -75,7 +76,64 @@ impl Default for UsageState {
             pane: UsagePane::Models,
             selected_idx: 0,
             logs_idx: 0,
+            loading_ranges: HashSet::new(),
         }
+    }
+}
+
+impl UsageState {
+    pub(crate) fn start_loading(
+        &mut self,
+        app_type: AppType,
+        range: crate::cli::tui::data::UsageRangePreset,
+    ) {
+        self.loading_ranges.insert((app_type, range));
+    }
+
+    pub(crate) fn finish_loading(
+        &mut self,
+        app_type: &AppType,
+        range: crate::cli::tui::data::UsageRangePreset,
+    ) {
+        self.loading_ranges.remove(&(app_type.clone(), range));
+    }
+
+    pub(crate) fn clear_loading(&mut self) {
+        self.loading_ranges.clear();
+    }
+
+    pub(crate) fn clear_custom_loading_for_app(&mut self, app_type: &AppType) {
+        self.loading_ranges.retain(|(loading_app_type, range)| {
+            loading_app_type != app_type
+                || !matches!(range, crate::cli::tui::data::UsageRangePreset::Custom(_))
+        });
+    }
+
+    pub(crate) fn is_loading_for(
+        &self,
+        app_type: &AppType,
+        range: crate::cli::tui::data::UsageRangePreset,
+    ) -> bool {
+        self.loading_ranges
+            .iter()
+            .any(|(loading_app_type, loading_range)| {
+                loading_app_type == app_type && usage_loading_range_matches(*loading_range, range)
+            })
+    }
+}
+
+fn usage_loading_range_matches(
+    loading_range: crate::cli::tui::data::UsageRangePreset,
+    active_range: crate::cli::tui::data::UsageRangePreset,
+) -> bool {
+    match (loading_range, active_range) {
+        (
+            crate::cli::tui::data::UsageRangePreset::Custom(loading),
+            crate::cli::tui::data::UsageRangePreset::Custom(active),
+        ) => loading == active,
+        (crate::cli::tui::data::UsageRangePreset::Custom(_), _) => false,
+        (_, crate::cli::tui::data::UsageRangePreset::Custom(_)) => false,
+        _ => true,
     }
 }
 

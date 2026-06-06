@@ -1,4 +1,4 @@
-use crate::cli::tui::data::ModelPricingRow;
+use crate::cli::tui::data::{ModelPricingRow, UsageRangePreset};
 
 use super::*;
 
@@ -39,7 +39,7 @@ pub(super) fn render_pricing(
         );
     }
 
-    render_summary_bar(frame, chunks[1], theme, pricing_summary_line(data));
+    render_summary_bar(frame, chunks[1], theme, pricing_summary_line(app, data));
     render_pricing_table(frame, app, data, chunks[2], theme);
 }
 
@@ -92,6 +92,11 @@ fn render_pricing_table(
 ) {
     let rows = app::visible_pricing_rows(&app.filter, data);
     if rows.is_empty() {
+        if current_pricing_is_loading(app, data) {
+            render_pricing_loading(frame, area, theme);
+            return;
+        }
+
         render_centered_pricing_lines(
             frame,
             area,
@@ -252,7 +257,11 @@ fn render_pricing_detail_body(
     );
 }
 
-fn pricing_summary_line(data: &UiData) -> String {
+fn pricing_summary_line(app: &App, data: &UiData) -> String {
+    if current_pricing_is_loading(app, data) {
+        return pricing_text("Loading...", "正在加载中...").to_string();
+    }
+
     if i18n::is_chinese() {
         let mut summary = format!(
             "{} 个目录模型 · 30天使用 {} 个 · 30天未匹配 {} 个模型 · {} tokens · {} total",
@@ -286,6 +295,23 @@ fn pricing_summary_line(data: &UiData) -> String {
         }
         summary
     }
+}
+
+fn current_pricing_is_loading(app: &App, data: &UiData) -> bool {
+    app.usage
+        .is_loading_for(&app.app_type, UsageRangePreset::SevenDays)
+        && !data.pricing.has_data()
+}
+
+fn render_pricing_loading(frame: &mut Frame<'_>, area: Rect, theme: &super::theme::Theme) {
+    render_centered_pricing_lines(
+        frame,
+        area,
+        vec![Line::styled(
+            pricing_text("Loading...", "正在加载中..."),
+            Style::default().fg(theme.comment),
+        )],
+    );
 }
 
 fn render_centered_pricing_lines(frame: &mut Frame<'_>, area: Rect, lines: Vec<Line<'static>>) {

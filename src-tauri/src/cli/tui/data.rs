@@ -640,6 +640,13 @@ impl ModelPricingSnapshot {
                 total.saturating_add(row.recent_total_tokens)
             })
     }
+
+    pub fn has_data(&self) -> bool {
+        !self.rows.is_empty()
+            || self.recent_unknown_models > 0
+            || self.recent_unmatched_total_tokens > 0
+            || self.recent_unmatched_total_cost_usd > 0.0
+    }
 }
 
 impl ConfigSnapshot {
@@ -782,6 +789,31 @@ impl UsageSnapshot {
             | UsageRangePreset::SevenDays
             | UsageRangePreset::ThirtyDays => self.logs_total,
         }
+    }
+
+    pub fn has_data_for(&self, range: UsageRangePreset) -> bool {
+        let summary = self.summary_for(range);
+        let has_stats = summary.total_requests > 0
+            || summary.total_tokens() > 0
+            || summary.total_cost_usd > 0.0
+            || self.trend_for(range).iter().any(|bucket| {
+                bucket.request_count > 0
+                    || bucket.total_tokens > 0
+                    || bucket.total_cost_usd > 0.0
+                    || bucket.error_count > 0
+            })
+            || !self.top_providers_for(range).is_empty()
+            || !self.top_models_for(range).is_empty();
+        if has_stats {
+            return true;
+        }
+
+        matches!(
+            range,
+            UsageRangePreset::Custom(custom_range)
+                if self.custom_range == Some(custom_range)
+                    && (!self.recent_logs_custom.is_empty() || self.logs_total_custom > 0)
+        )
     }
 }
 
