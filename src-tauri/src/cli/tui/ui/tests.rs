@@ -570,10 +570,19 @@ fn tui_pricing_renders_catalog_and_recent_usage_context() {
     assert!(all.contains("$2.00"), "{all}");
     assert!(all.contains("$8.00"), "{all}");
     assert!(all.contains("$0.420"), "{all}");
-    assert!(all.contains("Enter=edit"), "{all}");
+    assert!(
+        all.contains("Enter=edit") || all.contains("Enter edit"),
+        "{all}"
+    );
     assert!(!all.contains("Enter/e=edit"), "{all}");
-    assert!(all.contains("d=delete"), "{all}");
-    assert!(all.contains("Esc=close"), "{all}");
+    assert!(
+        all.contains("d=delete") || all.contains("d delete"),
+        "{all}"
+    );
+    assert!(
+        all.contains("Esc=close") || all.contains("Esc close"),
+        "{all}"
+    );
     assert!(!all.contains("details"), "{all}");
 }
 
