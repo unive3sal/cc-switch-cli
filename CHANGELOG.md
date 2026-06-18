@@ -7,6 +7,45 @@ All notable changes to CC Switch CLI will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [5.8.4] - 2026-06-19
+
+### Added
+
+- **Providers / ClaudeAPI**: Add the ClaudeAPI sponsor preset, logo, and README sponsor copy, with a Claude-only base URL preset at `https://gw.claudeapi.com`.
+- **Codex / Sessions**: Add the upstream-aligned unified Codex session history toggle. When enabled, official Codex subscription sessions can share the `custom` provider bucket with third-party providers, with backup-backed migration and restore support. The setting remains off by default.
+
+### Changed
+
+- **Provider / Live Config**: Merge live provider config updates safely instead of overwriting unrelated local changes, preserving app-specific semantics across Claude, Codex, Gemini, OpenCode, Hermes, and OpenClaw. [#283](https://github.com/SaladDay/cc-switch-cli/pull/283)
+- **OpenCode / Providers**: Preserve and edit provider-level `modalities`, including image-capable provider config blocks. Fixes [#241](https://github.com/SaladDay/cc-switch-cli/issues/241). [#285](https://github.com/SaladDay/cc-switch-cli/pull/285)
+- **TUI / Proxy Settings**: Align proxy listen-port editing with active workers so app-specific ports can be changed while other app proxy workers are running. [#270](https://github.com/SaladDay/cc-switch-cli/pull/270)
+
+### Fixed
+
+- **Auth / Codex OAuth**: Run `cc-switch auth login` polling sleeps inside the Tokio runtime, fixing the `there is no reactor running` panic while waiting for device authorization. Fixes [#271](https://github.com/SaladDay/cc-switch-cli/issues/271).
+- **Proxy / OpenAI Compatibility**: Strip unsupported `cache_control` fields during Anthropic-to-OpenAI conversion, omit `tool_choice` when no tools are sent, and handle truncated Codex chat streams without masking incomplete responses. Closes [#257](https://github.com/SaladDay/cc-switch-cli/issues/257). [#262](https://github.com/SaladDay/cc-switch-cli/pull/262)
+
+### Commits (since v5.8.3)
+
+- 9e77dfca Add ClaudeAPI sponsor preset
+- 15ba2f1d feat(opencode): preserve and edit provider modalities field (#285)
+- e5aaf50a feat(provider): merge live config updates safely (#283)
+- c106a11b fix(tui): align proxy listen port editing with active workers (#270)
+- caf2b240 fix(proxy): strip cache_control from OpenAI conversion, guard tool_choice, handle truncated streams (#262)
+- f661ab1c feat(codex): add unified session history toggle
+- 4008b2b9 fix(auth): run Codex login polling sleep in runtime
+
+### Thanks
+
+- Thanks `@mvanhorn` for the OpenCode modalities support in [#285](https://github.com/SaladDay/cc-switch-cli/pull/285).
+- Thanks `@unive3sal` for the live config merge work in [#283](https://github.com/SaladDay/cc-switch-cli/pull/283).
+- Thanks `@paigeman` for the proxy listen-port TUI alignment in [#270](https://github.com/SaladDay/cc-switch-cli/pull/270).
+- Thanks `@thedavidweng` for the proxy OpenAI conversion and truncated-stream fixes in [#262](https://github.com/SaladDay/cc-switch-cli/pull/262).
+- Thanks `@pantlive` and `@cjpc222` for reporting and confirming the Codex OAuth login panic in [#271](https://github.com/SaladDay/cc-switch-cli/issues/271).
+- Thanks `@farion1231` for the upstream Codex unified-session-history direction this release follows.
+- Thanks ClaudeAPI for sponsoring the project, and thanks `@SaladDay` for the sponsor preset integration, upstream alignment work, issue triage, and release coordination.
+- Thanks to everyone who reviewed PRs, tested provider/proxy flows, reported edge cases, and helped keep this release window moving.
+
 ## [5.8.3] - 2026-06-17
 
 ### Changed
