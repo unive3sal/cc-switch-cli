@@ -265,11 +265,16 @@ fn opencode_update_live_backed_provider_conflicts_on_changed_live_field() {
         serde_json::to_string_pretty(&json!({
             "$schema": "https://opencode.ai/config.json",
             "provider": {
-                "live-provider": opencode_provider(
-                    "live-provider",
-                    "Live Provider",
-                    "https://old.example.com/v1"
-                ).settings_config
+                "live-provider": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "options": {
+                        "baseURL": "https://local-edited.example.com/v1",
+                        "apiKey": "sk-live-provider"
+                    },
+                    "models": {
+                        "main": { "name": "Main" }
+                    }
+                }
             }
         }))
         .expect("serialize opencode live config"),
@@ -292,7 +297,7 @@ fn opencode_update_live_backed_provider_conflicts_on_changed_live_field() {
     let live = read_opencode_live(&opencode_path);
     assert_eq!(
         live["provider"]["live-provider"]["options"]["baseURL"],
-        json!("https://old.example.com/v1")
+        json!("https://local-edited.example.com/v1")
     );
 }
 
@@ -439,7 +444,7 @@ fn opencode_remove_from_live_config_marks_db_only_until_readded() {
         );
     }
 
-    let err = ProviderService::update(
+    ProviderService::update(
         &state,
         AppType::OpenCode,
         opencode_provider(
@@ -448,11 +453,10 @@ fn opencode_remove_from_live_config_marks_db_only_until_readded() {
             "https://toggle.new.example.com/v1",
         ),
     )
-    .expect_err("re-added opencode provider edit should conflict on changed live field");
-    assert_live_conflict(err, &["options.baseURL"]);
+    .expect("re-added opencode provider edit should update live config");
     assert_eq!(
         read_opencode_live(&opencode_path)["provider"]["toggle"]["options"]["baseURL"],
-        json!("https://toggle.old.example.com/v1")
+        json!("https://toggle.new.example.com/v1")
     );
 }
 

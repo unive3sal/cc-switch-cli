@@ -1829,11 +1829,28 @@ impl ProxyService {
         &self,
         app_type: &str,
     ) -> Result<(), String> {
-        let app_type = self
-            .prepare_proxy_and_auto_failover_activation(app_type)
-            .await?;
+        let app_type = {
+            let _guard =
+                crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+            self.prepare_proxy_and_auto_failover_activation(app_type)
+                .await?
+        };
         let app_key = app_type.as_str();
-        self.set_managed_session_for_app(app_key, true).await?;
+        if let Err(start_error) = self.set_managed_session_for_app(app_key, true).await {
+            {
+                let _guard =
+                    crate::services::state_coordination::acquire_restore_mutation_guard().await?;
+                if let Err(rollback_error) = self
+                    .disable_takeover_for_app_unlocked(&app_type, false)
+                    .await
+                {
+                    return Err(format!(
+                        "enable proxy and auto failover failed: {start_error}; rollback failed: {rollback_error}"
+                    ));
+                }
+            }
+            return Err(start_error);
+        }
         self.persist_auto_failover_for_app(app_key, true).await?;
 
         Ok(())
@@ -4530,6 +4547,89 @@ mod tests {
             .get_proxy_config_for_app("claude")
             .await
             .expect("load claude proxy config");
+        assert!(!config.auto_failover_enabled);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn enable_proxy_and_auto_failover_rolls_back_takeover_when_managed_session_start_fails() {
+        let temp_home = TempDir::new().expect("create temp home");
+        let _env = TestHomeEnvGuard::set(temp_home.path());
+        std::fs::create_dir_all(
+            get_claude_settings_path()
+                .parent()
+                .expect("claude settings parent dir"),
+        )
+        .expect("create ~/.claude");
+        let original_live = json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://local.example",
+                "ANTHROPIC_AUTH_TOKEN": "local-token",
+                "LOCAL_ONLY": "kept"
+            }
+        });
+        write_json_file(&get_claude_settings_path(), &original_live)
+            .expect("seed claude live config");
+
+        let db = Arc::new(Database::memory().expect("create database"));
+        let service = ProxyService::new(db.clone());
+        use_ephemeral_app_proxy_port(db.as_ref(), "claude");
+        let provider = Provider::with_id(
+            "queue-head".to_string(),
+            "Queue Head".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://queue.example",
+                    "ANTHROPIC_AUTH_TOKEN": "queue-token"
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider)
+            .expect("save queued provider");
+        db.add_to_failover_queue("claude", &provider.id)
+            .expect("queue provider");
+
+        let mut runtime_config = service.get_config().await.expect("get proxy config");
+        runtime_config.listen_port = 0;
+        service
+            .start_with_runtime_config(runtime_config)
+            .await
+            .expect("start foreground proxy runtime");
+
+        let error = service
+            .enable_proxy_and_auto_failover_for_app("claude")
+            .await
+            .expect_err("managed session start should fail while foreground runtime is active");
+
+        assert!(
+            error.contains("proxy is already running in foreground mode"),
+            "{error}"
+        );
+        service.stop().await.expect("stop foreground proxy runtime");
+
+        let live: Value =
+            read_json_file(&get_claude_settings_path()).expect("read restored claude live config");
+        assert_eq!(live, original_live);
+        assert!(
+            db.get_live_backup("claude")
+                .await
+                .expect("load claude live backup")
+                .is_none(),
+            "rollback should remove temporary live backup"
+        );
+        assert!(
+            db.list_failover_live_snapshots("claude")
+                .await
+                .expect("list failover snapshots")
+                .is_empty(),
+            "rollback should clear generated failover snapshots"
+        );
+        let config = db
+            .get_proxy_config_for_app("claude")
+            .await
+            .expect("load claude proxy config");
+        assert!(!config.enabled);
         assert!(!config.auto_failover_enabled);
     }
 

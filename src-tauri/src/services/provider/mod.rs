@@ -98,6 +98,7 @@ fn state_from_config(config: MultiAppConfig) -> AppState {
 struct PostCommitAction {
     app_type: AppType,
     provider: Provider,
+    previous_provider: Option<Provider>,
     backup: LiveSnapshot,
     sync_mcp: bool,
     refresh_snapshot: bool,
@@ -782,6 +783,7 @@ impl ProviderService {
             PreparedPostCommitEffect::Live(Self::prepare_live_snapshot_with_resolution(
                 &action.app_type,
                 &action.provider,
+                action.previous_provider.as_ref(),
                 action.common_config_snippet.as_deref(),
                 action.previous_common_config_snippet.as_deref(),
                 apply_common_config,
@@ -1241,6 +1243,7 @@ impl ProviderService {
         Ok(Some(PostCommitAction {
             app_type: app_type.clone(),
             provider,
+            previous_provider: None,
             backup: Self::capture_live_snapshot(app_type)?,
             sync_mcp: matches!(app_type, AppType::Codex) && !takeover_active,
             refresh_snapshot: false,
@@ -1906,6 +1909,7 @@ impl ProviderService {
                 Some(PostCommitAction {
                     app_type: app_type_clone.clone(),
                     provider: provider_to_store.clone(),
+                    previous_provider: None,
                     backup,
                     // Codex current-provider saves rewrite live config from the stored snapshot,
                     // so managed MCP must be synced back after the write.
@@ -2057,6 +2061,7 @@ impl ProviderService {
                 effective_current_provider.as_deref() == Some(provider_id.as_str())
             };
 
+            let previous_provider = manager.providers.get(&provider_id).cloned();
             manager
                 .providers
                 .insert(provider_id.clone(), merged.clone());
@@ -2066,6 +2071,7 @@ impl ProviderService {
                 Some(PostCommitAction {
                     app_type: app_type_clone.clone(),
                     provider: merged,
+                    previous_provider,
                     backup,
                     // Codex current-provider saves rewrite live config from the stored snapshot,
                     // so managed MCP must be synced back after the write.
@@ -2725,6 +2731,7 @@ impl ProviderService {
             return Ok(PostCommitAction {
                 app_type: app_type.clone(),
                 provider,
+                previous_provider: None,
                 backup: Self::capture_live_snapshot(app_type)?,
                 sync_mcp: matches!(app_type, AppType::OpenCode),
                 refresh_snapshot: false,
@@ -2754,6 +2761,7 @@ impl ProviderService {
         Ok(PostCommitAction {
             app_type: app_type.clone(),
             provider,
+            previous_provider: None,
             backup,
             sync_mcp: true,
             refresh_snapshot: true,
@@ -2878,6 +2886,7 @@ impl ProviderService {
         let prepared = Self::prepare_live_snapshot_with_resolution(
             app_type,
             provider,
+            None,
             common_config_snippet,
             previous_common_config_snippet,
             apply_common_config,
@@ -2889,6 +2898,7 @@ impl ProviderService {
     fn prepare_live_snapshot_with_resolution(
         app_type: &AppType,
         provider: &Provider,
+        previous_provider: Option<&Provider>,
         common_config_snippet: Option<&str>,
         previous_common_config_snippet: Option<&str>,
         apply_common_config: bool,
@@ -2946,13 +2956,23 @@ impl ProviderService {
                 let config = match serde_json::from_value::<crate::provider::OpenCodeProviderConfig>(
                     config_to_write.clone(),
                 ) {
-                    Ok(config) => crate::opencode_config::prepare_typed_provider_with_resolution(
+                    Ok(config) => {
+                        let previous_config = previous_provider.and_then(|previous| {
+                            serde_json::from_value::<crate::provider::OpenCodeProviderConfig>(
+                                previous.settings_config.clone(),
+                            )
+                            .ok()
+                        });
+                        crate::opencode_config::prepare_typed_provider_with_base_and_resolution(
+                            &provider.id,
+                            previous_config.as_ref(),
+                            &config,
+                            resolution,
+                        )?
+                    }
+                    Err(_) => crate::opencode_config::prepare_provider_with_base_and_resolution(
                         &provider.id,
-                        &config,
-                        resolution,
-                    )?,
-                    Err(_) => crate::opencode_config::prepare_provider_with_resolution(
-                        &provider.id,
+                        previous_provider.map(|previous| previous.settings_config.clone()),
                         config_to_write,
                         resolution,
                     )?,

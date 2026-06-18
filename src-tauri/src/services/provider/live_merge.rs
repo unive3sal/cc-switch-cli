@@ -174,6 +174,33 @@ pub fn merge_json_live(
     Ok(merged)
 }
 
+pub fn merge_json_with_base_live(
+    app_type: &AppType,
+    target: impl Into<String>,
+    local: Value,
+    base: &Value,
+    incoming: &Value,
+    resolution: ConflictResolution<'_>,
+) -> Result<Value, AppError> {
+    let target = target.into();
+    let mut merged = local;
+    let mut conflicts = Vec::new();
+    merge_json_value_with_base(
+        app_type,
+        &target,
+        String::new(),
+        &mut merged,
+        Some(base),
+        incoming,
+        resolution,
+        &mut conflicts,
+    )?;
+    if resolution.collects_failures() && !conflicts.is_empty() {
+        return Err(conflict_error(&conflicts));
+    }
+    Ok(merged)
+}
+
 fn merge_json_value(
     app_type: &AppType,
     target: &str,
@@ -206,6 +233,108 @@ fn merge_json_value(
         }
         (local_value, incoming_value) => {
             if local_value == incoming_value {
+                return Ok(());
+            }
+
+            let conflict = ConfigConflict {
+                app_type: app_type.clone(),
+                target: target.to_string(),
+                path: display_path(&path),
+                local: json_display(local_value),
+                incoming: json_display(incoming_value),
+            };
+            if resolution.collects_failures() {
+                conflicts.push(conflict);
+            } else {
+                match resolution.resolve(&[conflict])? {
+                    Some(ConflictChoice::UseIncoming) => {
+                        *local_value = incoming_value.clone();
+                    }
+                    Some(ConflictChoice::KeepLocal) | None => {}
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn merge_json_value_with_base(
+    app_type: &AppType,
+    target: &str,
+    path: String,
+    local: &mut Value,
+    base: Option<&Value>,
+    incoming: &Value,
+    resolution: ConflictResolution<'_>,
+    conflicts: &mut Vec<ConfigConflict>,
+) -> Result<(), AppError> {
+    if base.is_some_and(|base| base == incoming) {
+        return Ok(());
+    }
+
+    match (local, base, incoming) {
+        (Value::Object(local_map), base, Value::Object(incoming_map)) => {
+            let base_map = base.and_then(Value::as_object);
+            for (key, incoming_value) in incoming_map {
+                let next_path = json_child_path(&path, key);
+                match local_map.get_mut(key) {
+                    Some(local_value) => merge_json_value_with_base(
+                        app_type,
+                        target,
+                        next_path,
+                        local_value,
+                        base_map.and_then(|map| map.get(key)),
+                        incoming_value,
+                        resolution,
+                        conflicts,
+                    )?,
+                    None => {
+                        local_map.insert(key.clone(), incoming_value.clone());
+                    }
+                }
+            }
+            if let Some(base_map) = base_map {
+                for (key, base_value) in base_map {
+                    if incoming_map.contains_key(key) {
+                        continue;
+                    }
+                    let Some(local_value) = local_map.get(key) else {
+                        continue;
+                    };
+                    let next_path = json_child_path(&path, key);
+                    if local_value == base_value {
+                        local_map.remove(key);
+                        continue;
+                    }
+
+                    let conflict = ConfigConflict {
+                        app_type: app_type.clone(),
+                        target: target.to_string(),
+                        path: display_path(&next_path),
+                        local: json_display(local_value),
+                        incoming: "<removed>".to_string(),
+                    };
+                    if resolution.collects_failures() {
+                        conflicts.push(conflict);
+                    } else if matches!(
+                        resolution.resolve(&[conflict])?,
+                        Some(ConflictChoice::UseIncoming)
+                    ) {
+                        local_map.remove(key);
+                    }
+                }
+            }
+            Ok(())
+        }
+        (local_value, base, incoming_value) => {
+            if local_value == incoming_value {
+                return Ok(());
+            }
+
+            let local_matches_base = base.is_some_and(|base| local_value == base);
+            let incoming_changed_from_base = base.is_none_or(|base| incoming_value != base);
+            if local_matches_base || !incoming_changed_from_base {
+                *local_value = incoming_value.clone();
                 return Ok(());
             }
 
@@ -523,6 +652,137 @@ mod tests {
         .unwrap();
 
         assert_eq!(merged, json!({ "array": ["incoming"] }));
+    }
+
+    #[test]
+    fn json_merge_with_base_updates_when_local_matches_base() {
+        let base = json!({
+            "options": {
+                "baseURL": "https://old.example.com/v1",
+                "apiKey": "sk-old"
+            },
+            "models": {
+                "main": { "name": "Main" }
+            }
+        });
+        let local = base.clone();
+        let incoming = json!({
+            "options": {
+                "baseURL": "https://new.example.com/v1",
+                "apiKey": "sk-new"
+            },
+            "models": {
+                "main": { "name": "Main Updated" }
+            }
+        });
+
+        let merged = merge_json_with_base_live(
+            &AppType::OpenCode,
+            "opencode.json provider.local",
+            local,
+            &base,
+            &incoming,
+            ConflictPolicy::Fail.into(),
+        )
+        .unwrap();
+
+        assert_eq!(merged, incoming);
+    }
+
+    #[test]
+    fn json_merge_with_base_conflicts_when_local_and_incoming_changed() {
+        let base = json!({
+            "options": {
+                "baseURL": "https://old.example.com/v1",
+                "apiKey": "sk-old"
+            }
+        });
+        let local = json!({
+            "options": {
+                "baseURL": "https://local.example.com/v1",
+                "apiKey": "sk-old"
+            }
+        });
+        let incoming = json!({
+            "options": {
+                "baseURL": "https://incoming.example.com/v1",
+                "apiKey": "sk-new"
+            }
+        });
+
+        let err = merge_json_with_base_live(
+            &AppType::OpenCode,
+            "opencode.json provider.local",
+            local,
+            &base,
+            &incoming,
+            ConflictPolicy::Fail.into(),
+        )
+        .unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("options.baseURL"), "{message}");
+        assert!(!message.contains("options.apiKey"), "{message}");
+    }
+
+    #[test]
+    fn json_merge_with_base_removes_deleted_incoming_keys_when_local_matches_base() {
+        let base = json!({
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {
+                "baseURL": "https://old.example.com/v1"
+            },
+            "modalities": { "input": ["text", "image"] },
+            "localOnly": true
+        });
+        let local = base.clone();
+        let incoming = json!({
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {
+                "baseURL": "https://new.example.com/v1"
+            },
+            "localOnly": true
+        });
+
+        let merged = merge_json_with_base_live(
+            &AppType::OpenCode,
+            "opencode.json provider.vision",
+            local,
+            &base,
+            &incoming,
+            ConflictPolicy::Fail.into(),
+        )
+        .unwrap();
+
+        assert!(merged.get("modalities").is_none());
+        assert_eq!(
+            merged.pointer("/options/baseURL").and_then(Value::as_str),
+            Some("https://new.example.com/v1")
+        );
+        assert_eq!(merged.get("localOnly"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn json_merge_with_base_conflicts_on_deleted_key_changed_locally() {
+        let base = json!({
+            "modalities": { "input": ["text", "image"] }
+        });
+        let local = json!({
+            "modalities": { "input": ["text"] }
+        });
+        let incoming = json!({});
+
+        let err = merge_json_with_base_live(
+            &AppType::OpenCode,
+            "opencode.json provider.vision",
+            local,
+            &base,
+            &incoming,
+            ConflictPolicy::Fail.into(),
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("modalities"));
     }
 
     #[test]
