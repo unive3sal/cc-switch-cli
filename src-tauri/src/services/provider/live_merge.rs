@@ -289,7 +289,30 @@ fn merge_json_value_with_base(
                         conflicts,
                     )?,
                     None => {
-                        local_map.insert(key.clone(), incoming_value.clone());
+                        let base_value = base_map.and_then(|map| map.get(key));
+                        if let Some(base_value) = base_value {
+                            if incoming_value == base_value {
+                                continue;
+                            }
+
+                            let conflict = ConfigConflict {
+                                app_type: app_type.clone(),
+                                target: target.to_string(),
+                                path: display_path(&next_path),
+                                local: "<removed>".to_string(),
+                                incoming: json_display(incoming_value),
+                            };
+                            if resolution.collects_failures() {
+                                conflicts.push(conflict);
+                            } else if matches!(
+                                resolution.resolve(&[conflict])?,
+                                Some(ConflictChoice::UseIncoming)
+                            ) {
+                                local_map.insert(key.clone(), incoming_value.clone());
+                            }
+                        } else {
+                            local_map.insert(key.clone(), incoming_value.clone());
+                        }
                     }
                 }
             }
@@ -783,6 +806,78 @@ mod tests {
         .unwrap_err();
 
         assert!(err.to_string().contains("modalities"));
+    }
+
+    #[test]
+    fn json_merge_with_base_preserves_live_deleted_key_when_incoming_matches_base() {
+        let base = json!({
+            "options": {
+                "baseURL": "https://old.example.com/v1",
+                "apiKey": "sk-old"
+            }
+        });
+        let local = json!({
+            "options": {
+                "baseURL": "https://old.example.com/v1"
+            }
+        });
+        let incoming = json!({
+            "options": {
+                "baseURL": "https://new.example.com/v1",
+                "apiKey": "sk-old"
+            }
+        });
+
+        let merged = merge_json_with_base_live(
+            &AppType::OpenCode,
+            "opencode.json provider.vision",
+            local,
+            &base,
+            &incoming,
+            ConflictPolicy::Fail.into(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            merged.pointer("/options/baseURL").and_then(Value::as_str),
+            Some("https://new.example.com/v1")
+        );
+        assert!(merged.pointer("/options/apiKey").is_none());
+    }
+
+    #[test]
+    fn json_merge_with_base_conflicts_when_live_deleted_key_and_incoming_changed() {
+        let base = json!({
+            "options": {
+                "baseURL": "https://old.example.com/v1",
+                "apiKey": "sk-old"
+            }
+        });
+        let local = json!({
+            "options": {
+                "baseURL": "https://old.example.com/v1"
+            }
+        });
+        let incoming = json!({
+            "options": {
+                "baseURL": "https://new.example.com/v1",
+                "apiKey": "sk-new"
+            }
+        });
+
+        let err = merge_json_with_base_live(
+            &AppType::OpenCode,
+            "opencode.json provider.vision",
+            local,
+            &base,
+            &incoming,
+            ConflictPolicy::Fail.into(),
+        )
+        .unwrap_err();
+        let message = err.to_string();
+
+        assert!(message.contains("options.apiKey"), "{message}");
+        assert!(!message.contains("options.baseURL"), "{message}");
     }
 
     #[test]

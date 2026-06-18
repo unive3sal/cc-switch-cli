@@ -145,6 +145,12 @@ enum ExternalProxyStatusProbe {
     Unreachable,
 }
 
+struct AutoFailoverActivation {
+    app_type: AppType,
+    previous_db_current_provider: Option<String>,
+    previous_local_current_provider: Option<String>,
+}
+
 fn proxy_runtime_registry() -> &'static StdMutex<HashMap<String, Weak<ProxyRuntimeState>>> {
     static REGISTRY: OnceLock<StdMutex<HashMap<String, Weak<ProxyRuntimeState>>>> = OnceLock::new();
     REGISTRY.get_or_init(|| StdMutex::new(HashMap::new()))
@@ -1814,35 +1820,85 @@ impl ProxyService {
     async fn prepare_proxy_and_auto_failover_activation(
         &self,
         app_type: &str,
-    ) -> Result<AppType, String> {
+    ) -> Result<AutoFailoverActivation, String> {
         let first_provider_id = self.first_failover_provider_id(app_type)?;
         let app_type = Self::takeover_app_from_str(app_type)?;
         let app_key = app_type.as_str();
+        let previous_db_current_provider = self
+            .db
+            .get_current_provider(app_key)
+            .map_err(|error| format!("load current provider for {app_key} failed: {error}"))?;
+        let previous_local_current_provider = crate::settings::get_current_provider(&app_type);
         self.regenerate_failover_live_snapshots_for_app(&app_type, Some(&first_provider_id))
             .await?;
         self.switch_proxy_target(app_key, &first_provider_id)
             .await?;
-        Ok(app_type)
+        Ok(AutoFailoverActivation {
+            app_type,
+            previous_db_current_provider,
+            previous_local_current_provider,
+        })
+    }
+
+    fn restore_current_provider_after_activation_failure(
+        &self,
+        activation: &AutoFailoverActivation,
+    ) -> Result<(), String> {
+        let app_key = activation.app_type.as_str();
+        match activation.previous_db_current_provider.as_deref() {
+            Some(provider_id) => {
+                self.db
+                    .set_current_provider(app_key, provider_id)
+                    .map_err(|error| {
+                        format!("restore current provider for {app_key} failed: {error}")
+                    })?
+            }
+            None => self.clear_database_current_provider_for_app(app_key)?,
+        }
+        crate::settings::set_current_provider(
+            &activation.app_type,
+            activation.previous_local_current_provider.as_deref(),
+        )
+        .map_err(|error| format!("restore local current provider for {app_key} failed: {error}"))
+    }
+
+    fn clear_database_current_provider_for_app(&self, app_type: &str) -> Result<(), String> {
+        let conn = self.db.conn.lock().map_err(|error| {
+            format!("lock database to clear current provider for {app_type} failed: {error}")
+        })?;
+        conn.execute(
+            "UPDATE providers SET is_current = 0 WHERE app_type = ?1",
+            rusqlite::params![app_type],
+        )
+        .map_err(|error| format!("clear current provider for {app_type} failed: {error}"))?;
+        Ok(())
     }
 
     pub async fn enable_proxy_and_auto_failover_for_app(
         &self,
         app_type: &str,
     ) -> Result<(), String> {
-        let app_type = {
+        let activation = {
             let _guard =
                 crate::services::state_coordination::acquire_restore_mutation_guard().await?;
             self.prepare_proxy_and_auto_failover_activation(app_type)
                 .await?
         };
-        let app_key = app_type.as_str();
+        let app_key = activation.app_type.as_str();
         if let Err(start_error) = self.set_managed_session_for_app(app_key, true).await {
             {
                 let _guard =
                     crate::services::state_coordination::acquire_restore_mutation_guard().await?;
                 if let Err(rollback_error) = self
-                    .disable_takeover_for_app_unlocked(&app_type, false)
+                    .disable_takeover_for_app_unlocked(&activation.app_type, false)
                     .await
+                {
+                    return Err(format!(
+                        "enable proxy and auto failover failed: {start_error}; rollback failed: {rollback_error}"
+                    ));
+                }
+                if let Err(rollback_error) =
+                    self.restore_current_provider_after_activation_failure(&activation)
                 {
                     return Err(format!(
                         "enable proxy and auto failover failed: {start_error}; rollback failed: {rollback_error}"
@@ -4574,6 +4630,17 @@ mod tests {
         let db = Arc::new(Database::memory().expect("create database"));
         let service = ProxyService::new(db.clone());
         use_ephemeral_app_proxy_port(db.as_ref(), "claude");
+        let previous_provider = Provider::with_id(
+            "previous".to_string(),
+            "Previous".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://previous.example",
+                    "ANTHROPIC_AUTH_TOKEN": "previous-token"
+                }
+            }),
+            None,
+        );
         let provider = Provider::with_id(
             "queue-head".to_string(),
             "Queue Head".to_string(),
@@ -4585,8 +4652,14 @@ mod tests {
             }),
             None,
         );
+        db.save_provider("claude", &previous_provider)
+            .expect("save previous provider");
         db.save_provider("claude", &provider)
             .expect("save queued provider");
+        db.set_current_provider("claude", &previous_provider.id)
+            .expect("set previous database current provider");
+        crate::settings::set_current_provider(&AppType::Claude, Some(&previous_provider.id))
+            .expect("set previous local current provider");
         db.add_to_failover_queue("claude", &provider.id)
             .expect("queue provider");
 
@@ -4631,6 +4704,16 @@ mod tests {
             .expect("load claude proxy config");
         assert!(!config.enabled);
         assert!(!config.auto_failover_enabled);
+        assert_eq!(
+            db.get_current_provider("claude")
+                .expect("load database current provider")
+                .as_deref(),
+            Some("previous")
+        );
+        assert_eq!(
+            crate::settings::get_current_provider(&AppType::Claude).as_deref(),
+            Some("previous")
+        );
     }
 
     #[tokio::test]
@@ -4790,12 +4873,12 @@ mod tests {
         db.add_to_failover_queue("claude", &provider.id)
             .expect("queue provider");
 
-        let app_type = service
+        let activation = service
             .prepare_proxy_and_auto_failover_activation("claude")
             .await
             .expect("prepare proxy and auto failover activation");
 
-        assert_eq!(app_type, AppType::Claude);
+        assert_eq!(activation.app_type, AppType::Claude);
         assert_eq!(
             crate::settings::get_effective_current_provider(db.as_ref(), &AppType::Claude)
                 .expect("load effective current provider")
