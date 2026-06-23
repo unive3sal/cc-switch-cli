@@ -1842,6 +1842,7 @@ fn stream_check_result_lines_include_core_fields() {
         model_used: "gpt-5.1-codex".to_string(),
         tested_at: 1_700_000_000,
         retry_count: 1,
+        error_category: None,
     };
 
     let lines = build_stream_check_result_lines("Provider One", &result);
