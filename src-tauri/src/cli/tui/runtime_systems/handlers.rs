@@ -449,19 +449,39 @@ pub(crate) fn handle_skills_msg(
 ) -> Result<CacheInvalidation, AppError> {
     let mut invalidation = CacheInvalidation::None;
     match msg {
-        SkillsMsg::DiscoverFinished { query, result } => match result {
+        SkillsMsg::DiscoverFinished {
+            request_id,
+            query,
+            source,
+            result,
+        } => match result {
             Ok(skills) => {
+                if app.skills_discover_active_request_id != Some(request_id) {
+                    return Ok(invalidation);
+                }
                 app.overlay = Overlay::None;
+                app.skills_discover_loading = false;
+                app.skills_discover_active_request_id = None;
                 app.skills_discover_results = skills;
                 app.skills_discover_idx = 0;
                 app.skills_discover_query = query.clone();
+                app.skills_discover_source = source;
+                app.skills_discover_cache.insert(
+                    (source, query.trim().to_lowercase()),
+                    app.skills_discover_results.clone(),
+                );
                 app.push_toast(
                     texts::tui_toast_skills_discover_finished(app.skills_discover_results.len()),
                     ToastKind::Success,
                 );
             }
             Err(err) => {
+                if app.skills_discover_active_request_id != Some(request_id) {
+                    return Ok(invalidation);
+                }
                 app.overlay = Overlay::None;
+                app.skills_discover_loading = false;
+                app.skills_discover_active_request_id = None;
                 app.push_toast(
                     texts::tui_toast_skills_discover_failed(&err),
                     ToastKind::Error,
@@ -475,8 +495,19 @@ pub(crate) fn handle_skills_msg(
                 invalidation = CacheInvalidation::DataReloaded;
 
                 for row in app.skills_discover_results.iter_mut() {
-                    if row.directory.eq_ignore_ascii_case(&installed.directory) {
+                    if row.key == installed.id
+                        || row.directory.eq_ignore_ascii_case(&installed.directory)
+                    {
                         row.installed = true;
+                    }
+                }
+                for rows in app.skills_discover_cache.values_mut() {
+                    for row in rows.iter_mut() {
+                        if row.key == installed.id
+                            || row.directory.eq_ignore_ascii_case(&installed.directory)
+                        {
+                            row.installed = true;
+                        }
                     }
                 }
 

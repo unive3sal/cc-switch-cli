@@ -196,13 +196,23 @@ pub(crate) enum SessionUsageSyncMsg {
 }
 
 pub(crate) enum SkillsReq {
-    Discover { query: String },
-    Install { spec: String, app: AppType },
+    Discover {
+        request_id: u64,
+        query: String,
+        source: crate::cli::tui::app::SkillsDiscoverSource,
+        force: bool,
+    },
+    Install {
+        spec: String,
+        app: AppType,
+    },
 }
 
 pub(crate) enum SkillsMsg {
     DiscoverFinished {
+        request_id: u64,
         query: String,
+        source: crate::cli::tui::app::SkillsDiscoverSource,
         result: Result<Vec<crate::services::skill::Skill>, String>,
     },
     InstallFinished {
