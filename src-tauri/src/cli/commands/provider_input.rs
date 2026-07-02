@@ -317,12 +317,12 @@ const PROVIDER_TEMPLATE_CHOICES_CLAUDE: [ProviderAddTemplateChoice; 11] = [
         label: SPONSOR_PROVIDER_PRESETS[7].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Packycode,
-        label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
-    },
-    ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Cubence,
         label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Packycode,
+        label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
     },
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Runapi,
@@ -356,12 +356,12 @@ const PROVIDER_TEMPLATE_CHOICES_CODEX: [ProviderAddTemplateChoice; 10] = [
         label: SPONSOR_PROVIDER_PRESETS[7].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Packycode,
-        label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
-    },
-    ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Cubence,
         label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Packycode,
+        label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
     },
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Runapi,
@@ -395,12 +395,12 @@ const PROVIDER_TEMPLATE_CHOICES_GEMINI: [ProviderAddTemplateChoice; 6] = [
         label: SPONSOR_PROVIDER_PRESETS[6].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Packycode,
-        label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
-    },
-    ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Cubence,
         label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Packycode,
+        label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
     },
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Aicodemirror,
@@ -1439,8 +1439,8 @@ requires_openai_auth = true
                 "* ClaudeAPI",
                 "* Qiniu",
                 "* FennoAI",
-                "* PackyCode",
                 "* Cubence",
+                "* PackyCode",
                 "* RunAPI",
                 "* AICodeMirror",
                 "* DDS",
@@ -1453,8 +1453,8 @@ requires_openai_auth = true
                 "OpenAI Official",
                 "* Qiniu",
                 "* FennoAI",
-                "* PackyCode",
                 "* Cubence",
+                "* PackyCode",
                 "* RunAPI",
                 "* AICodeMirror",
                 "* DDS",
@@ -1467,8 +1467,8 @@ requires_openai_auth = true
                 "Custom",
                 "Google OAuth",
                 "* Qiniu",
-                "* PackyCode",
                 "* Cubence",
+                "* PackyCode",
                 "* AICodeMirror",
             ]
         );

@@ -71,6 +71,16 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
   </tr>
   <tr>
     <td width="180">
+      <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">
+        <img src="assets/partners/logos/cubence.png" alt="Cubence" width="150">
+      </a>
+    </td>
+    <td>
+      Thanks to <b>Cubence</b> for sponsoring this project! Cubence is an API relay service provider dedicated to offering stable and efficient services to its customers. Operating since September 2025, it has provided support for various models such as Claude code, Codex, and Gemini. Register via <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">this link</a> and use the <code>CCSCLI</code> discount code when topping up to enjoy a 10% discount.
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
       <a href="https://www.packyapi.com/register?aff=cc-switch-cli">
         <img src="assets/partners/logos/packycode.png" alt="PackyCode" width="150">
       </a>
@@ -78,16 +88,6 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
     <td>
       Thanks to <b>PackyCode</b> for sponsoring this project! PackyCode is a reliable and efficient API relay service provider, offering relay services for Claude Code, Codex, Gemini, and more. <br/>
       PackyCode provides special discounts for our software users: register via <a href="https://www.packyapi.com/register?aff=cc-switch-cli">this link</a> and use promo code <code>cc-switch-cli</code> when recharging to get <b>10% off</b>.
-    </td>
-  </tr>
-  <tr>
-    <td width="180">
-      <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">
-        <img src="assets/partners/logos/cubence.png" alt="Cubence" width="150">
-      </a>
-    </td>
-    <td>
-      Thanks to <b>Cubence</b> for sponsoring this project! Cubence is an API relay service provider dedicated to offering stable and efficient services to its customers. Operating since September 2025, it has provided support for various models such as Claude code, Codex, and Gemini. Register via <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">this link</a> and use the <code>CCSCLI</code> discount code when topping up to enjoy a 10% discount.
     </td>
   </tr>
   <tr>

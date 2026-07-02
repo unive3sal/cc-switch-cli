@@ -67,6 +67,16 @@
   </tr>
   <tr>
     <td width="180">
+      <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">
+        <img src="assets/partners/logos/cubence.png" alt="Cubence" width="150">
+      </a>
+    </td>
+    <td>
+      感谢 <b>Cubence</b> 赞助本项目！Cubence 是一家致力为客户提供稳定、高效的API中转服务商。从25年9月运营至今，提供了Claude code、Codex、Gemini等多种模型支持。通过<a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">此链接</a>注册，并在充值时使用 <code>CCSCLI</code> 优惠码享受9折优惠。
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
       <a href="https://www.packyapi.com/register?aff=cc-switch-cli">
         <img src="assets/partners/logos/packycode.png" alt="PackyCode" width="150">
       </a>
@@ -77,16 +87,6 @@
       CC-Switch CLI 专属优惠：通过
       <a href="https://www.packyapi.com/register?aff=cc-switch-cli">此链接</a>
       注册，并在充值时填写优惠码 <code>cc-switch-cli</code>，即可享受 <b>9 折优惠</b>。
-    </td>
-  </tr>
-  <tr>
-    <td width="180">
-      <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">
-        <img src="assets/partners/logos/cubence.png" alt="Cubence" width="150">
-      </a>
-    </td>
-    <td>
-      感谢 <b>Cubence</b> 赞助本项目！Cubence 是一家致力为客户提供稳定、高效的API中转服务商。从25年9月运营至今，提供了Claude code、Codex、Gemini等多种模型支持。通过<a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">此链接</a>注册，并在充值时使用 <code>CCSCLI</code> 优惠码享受9折优惠。
     </td>
   </tr>
   <tr>
