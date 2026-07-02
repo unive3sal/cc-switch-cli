@@ -317,16 +317,16 @@ const PROVIDER_TEMPLATE_CHOICES_CLAUDE: [ProviderAddTemplateChoice; 11] = [
         label: SPONSOR_PROVIDER_PRESETS[7].chip_label,
     },
     ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Runapi,
+        label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
+    },
+    ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Cubence,
         label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
     },
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Packycode,
         label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
-    },
-    ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Runapi,
-        label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
     },
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Aicodemirror,
@@ -356,16 +356,16 @@ const PROVIDER_TEMPLATE_CHOICES_CODEX: [ProviderAddTemplateChoice; 10] = [
         label: SPONSOR_PROVIDER_PRESETS[7].chip_label,
     },
     ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Runapi,
+        label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
+    },
+    ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Cubence,
         label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
     },
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Packycode,
         label: SPONSOR_PROVIDER_PRESETS[1].chip_label,
-    },
-    ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Runapi,
-        label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
     },
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Aicodemirror,
@@ -422,12 +422,12 @@ const PROVIDER_TEMPLATE_CHOICES_OPENCODE: [ProviderAddTemplateChoice; 6] = [
         label: SPONSOR_PROVIDER_PRESETS[7].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Cubence,
-        label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
-    },
-    ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Runapi,
         label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Cubence,
+        label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
     },
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Aicodemirror,
@@ -449,12 +449,12 @@ const PROVIDER_TEMPLATE_CHOICES_HERMES: [ProviderAddTemplateChoice; 5] = [
         label: SPONSOR_PROVIDER_PRESETS[7].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Cubence,
-        label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
-    },
-    ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Runapi,
         label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Cubence,
+        label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
     },
 ];
 
@@ -472,12 +472,12 @@ const PROVIDER_TEMPLATE_CHOICES_OPENCLAW: [ProviderAddTemplateChoice; 6] = [
         label: SPONSOR_PROVIDER_PRESETS[7].chip_label,
     },
     ProviderAddTemplateChoice {
-        template: ProviderAddTemplate::Cubence,
-        label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
-    },
-    ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Runapi,
         label: SPONSOR_PROVIDER_PRESETS[3].chip_label,
+    },
+    ProviderAddTemplateChoice {
+        template: ProviderAddTemplate::Cubence,
+        label: SPONSOR_PROVIDER_PRESETS[2].chip_label,
     },
     ProviderAddTemplateChoice {
         template: ProviderAddTemplate::Aicodemirror,
@@ -1439,9 +1439,9 @@ requires_openai_auth = true
                 "* ClaudeAPI",
                 "* Qiniu",
                 "* FennoAI",
+                "* RunAPI",
                 "* Cubence",
                 "* PackyCode",
-                "* RunAPI",
                 "* AICodeMirror",
                 "* DDS",
             ]
@@ -1453,9 +1453,9 @@ requires_openai_auth = true
                 "OpenAI Official",
                 "* Qiniu",
                 "* FennoAI",
+                "* RunAPI",
                 "* Cubence",
                 "* PackyCode",
-                "* RunAPI",
                 "* AICodeMirror",
                 "* DDS",
                 "DeepSeek",
@@ -1478,14 +1478,14 @@ requires_openai_auth = true
                 "Custom",
                 "* Qiniu",
                 "* FennoAI",
-                "* Cubence",
                 "* RunAPI",
+                "* Cubence",
                 "* AICodeMirror"
             ]
         );
         assert_eq!(
             labels(AppType::Hermes),
-            vec!["Custom", "* Qiniu", "* FennoAI", "* Cubence", "* RunAPI"]
+            vec!["Custom", "* Qiniu", "* FennoAI", "* RunAPI", "* Cubence"]
         );
         assert_eq!(
             labels(AppType::OpenClaw),
@@ -1493,8 +1493,8 @@ requires_openai_auth = true
                 "Custom",
                 "* Qiniu",
                 "* FennoAI",
-                "* Cubence",
                 "* RunAPI",
+                "* Cubence",
                 "* AICodeMirror"
             ]
         );

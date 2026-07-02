@@ -71,6 +71,16 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
   </tr>
   <tr>
     <td width="180">
+      <a href="https://runapi.co/register?aff=kTlB">
+        <img src="assets/partners/logos/runapi.png" alt="RunAPI" width="150">
+      </a>
+    </td>
+    <td>
+      Thanks to <b>RunAPI</b> for sponsoring this project! <a href="https://runapi.co/register?aff=kTlB"><b>RunAPI</b></a> is a fast, stable API platform and OpenRouter alternative. One API key gives access to 150+ mainstream models, including OpenAI, Claude, Gemini, DeepSeek, and Grok, with prices as low as 10% of the original cost. It works with tools such as Claude Code and OpenClaw. Exclusive benefit for cc-switch-cli users: register and contact the admin to claim CNY 7 in free credits.
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
       <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">
         <img src="assets/partners/logos/cubence.png" alt="Cubence" width="150">
       </a>
@@ -88,16 +98,6 @@ This project is a **CLI fork** of [CC-Switch](https://github.com/farion1231/cc-s
     <td>
       Thanks to <b>PackyCode</b> for sponsoring this project! PackyCode is a reliable and efficient API relay service provider, offering relay services for Claude Code, Codex, Gemini, and more. <br/>
       PackyCode provides special discounts for our software users: register via <a href="https://www.packyapi.com/register?aff=cc-switch-cli">this link</a> and use promo code <code>cc-switch-cli</code> when recharging to get <b>10% off</b>.
-    </td>
-  </tr>
-  <tr>
-    <td width="180">
-      <a href="https://runapi.co/register?aff=kTlB">
-        <img src="assets/partners/logos/runapi.png" alt="RunAPI" width="150">
-      </a>
-    </td>
-    <td>
-      Thanks to <b>RunAPI</b> for sponsoring this project! <a href="https://runapi.co/register?aff=kTlB"><b>RunAPI</b></a> is a fast, stable API platform and OpenRouter alternative. One API key gives access to 150+ mainstream models, including OpenAI, Claude, Gemini, DeepSeek, and Grok, with prices as low as 10% of the original cost. It works with tools such as Claude Code and OpenClaw. Exclusive benefit for cc-switch-cli users: register and contact the admin to claim CNY 7 in free credits.
     </td>
   </tr>
   <tr>

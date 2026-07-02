@@ -106,9 +106,9 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "* ClaudeAPI",
             "* Qiniu",
             "* FennoAI",
+            "* RunAPI",
             "* Cubence",
             "* PackyCode",
-            "* RunAPI",
             "* AICodeMirror",
             "* DDS",
         ]
@@ -122,9 +122,9 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "OpenAI Official",
             "* Qiniu",
             "* FennoAI",
+            "* RunAPI",
             "* Cubence",
             "* PackyCode",
-            "* RunAPI",
             "* AICodeMirror",
             "* DDS",
             "DeepSeek",
@@ -151,8 +151,8 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Custom",
             "* Qiniu",
             "* FennoAI",
-            "* Cubence",
             "* RunAPI",
+            "* Cubence",
             "* AICodeMirror"
         ]
     );
@@ -168,7 +168,7 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
     let hermes_labels = ProviderAddFormState::new(AppType::Hermes).template_labels();
     assert_eq!(
         hermes_labels,
-        vec!["Custom", "* Qiniu", "* FennoAI", "* Cubence", "* RunAPI"]
+        vec!["Custom", "* Qiniu", "* FennoAI", "* RunAPI", "* Cubence"]
     );
 
     let openclaw_labels = ProviderAddFormState::new(AppType::OpenClaw).template_labels();
@@ -178,8 +178,8 @@ fn provider_add_form_template_labels_follow_explicit_support_matrix() {
             "Custom",
             "* Qiniu",
             "* FennoAI",
-            "* Cubence",
             "* RunAPI",
+            "* Cubence",
             "* AICodeMirror"
         ]
     );
@@ -3243,8 +3243,8 @@ fn provider_add_form_opencode_exposes_supported_sponsor_presets() {
             "Custom",
             "* Qiniu",
             "* FennoAI",
-            "* Cubence",
             "* RunAPI",
+            "* Cubence",
             "* AICodeMirror"
         ]
     );
@@ -3268,8 +3268,8 @@ fn provider_add_form_openclaw_uses_dedicated_template_defs() {
             "Custom",
             "* Qiniu",
             "* FennoAI",
-            "* Cubence",
             "* RunAPI",
+            "* Cubence",
             "* AICodeMirror"
         ]
     );

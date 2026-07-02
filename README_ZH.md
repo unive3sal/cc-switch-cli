@@ -67,6 +67,16 @@
   </tr>
   <tr>
     <td width="180">
+      <a href="https://runapi.co/register?aff=kTlB">
+        <img src="assets/partners/logos/runapi.png" alt="RunAPI" width="150">
+      </a>
+    </td>
+    <td>
+      感谢 <b>RunAPI</b> 赞助本项目！<a href="https://runapi.co/register?aff=kTlB"><b>RunAPI</b></a> 是高效稳定的 API 平台和 OpenRouter 平替，一个 API Key 即可访问 OpenAI、Claude、Gemini、DeepSeek、Grok 等 150+ 主流模型，低至 1 折，极其稳定，可以无缝兼容 Claude Code、OpenClaw 等工具。cc-switch-cli 用户专属福利：注册联系管理员即可领取 ￥7 的免费额度。
+    </td>
+  </tr>
+  <tr>
+    <td width="180">
       <a href="https://cubence.com/signup?code=SC3M1CAH&source=ccscli">
         <img src="assets/partners/logos/cubence.png" alt="Cubence" width="150">
       </a>
@@ -87,16 +97,6 @@
       CC-Switch CLI 专属优惠：通过
       <a href="https://www.packyapi.com/register?aff=cc-switch-cli">此链接</a>
       注册，并在充值时填写优惠码 <code>cc-switch-cli</code>，即可享受 <b>9 折优惠</b>。
-    </td>
-  </tr>
-  <tr>
-    <td width="180">
-      <a href="https://runapi.co/register?aff=kTlB">
-        <img src="assets/partners/logos/runapi.png" alt="RunAPI" width="150">
-      </a>
-    </td>
-    <td>
-      感谢 <b>RunAPI</b> 赞助本项目！<a href="https://runapi.co/register?aff=kTlB"><b>RunAPI</b></a> 是高效稳定的 API 平台和 OpenRouter 平替，一个 API Key 即可访问 OpenAI、Claude、Gemini、DeepSeek、Grok 等 150+ 主流模型，低至 1 折，极其稳定，可以无缝兼容 Claude Code、OpenClaw 等工具。cc-switch-cli 用户专属福利：注册联系管理员即可领取 ￥7 的免费额度。
     </td>
   </tr>
   <tr>
