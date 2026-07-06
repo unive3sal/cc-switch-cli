@@ -107,6 +107,48 @@ pub(super) fn truncate_to_display_width(text: &str, width: u16) -> String {
     out
 }
 
+/// Standard page shell: the outer bordered block with a padded title, the
+/// page key bar (always visible, dimmed without content focus), and an
+/// optional summary bar. Returns the body rect below them.
+pub(super) fn render_page_frame(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    theme: &super::theme::Theme,
+    app: &App,
+    title: &str,
+    keys: &[(&str, &str)],
+    summary: Option<String>,
+) -> Rect {
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pane_border_style(app, Focus::Content, theme))
+        .title(format!(" {} ", title));
+    frame.render_widget(outer.clone(), area);
+    let inner = outer.inner(area);
+
+    let constraints = if summary.is_some() {
+        vec![
+            Constraint::Length(1),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ]
+    } else {
+        vec![Constraint::Length(1), Constraint::Min(0)]
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    render_page_key_bar(frame, chunks[0], theme, keys, app.focus == Focus::Content);
+    if let Some(summary) = summary {
+        render_summary_bar(frame, chunks[1], theme, summary);
+    }
+
+    *chunks.last().expect("page frame always has a body chunk")
+}
+
 /// Sub-page titles show their place in the hierarchy (" Usage › Details ")
 /// so nesting depth stays visible and Esc's destination is predictable.
 pub(super) fn breadcrumb_title(segments: &[&str]) -> String {

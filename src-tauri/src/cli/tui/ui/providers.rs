@@ -157,28 +157,23 @@ pub(super) fn render_providers(
     let header_style = Style::default().fg(theme.dim).add_modifier(Modifier::BOLD);
     let table_style = Style::default();
 
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(pane_border_style(app, Focus::Content, theme))
-        .title(format!(" {} ", texts::menu_manage_providers()));
-    frame.render_widget(outer.clone(), area);
-    let inner = outer.inner(area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(inner);
-
     let visible = provider_rows_filtered(app, data);
     let keys = crate::cli::tui::keymap::providers::key_bar_items(app, data);
-    render_page_key_bar(frame, chunks[0], theme, &keys, app.focus == Focus::Content);
+    let body = render_page_frame(
+        frame,
+        area,
+        theme,
+        app,
+        texts::menu_manage_providers(),
+        &keys,
+        None,
+    );
 
     if data.providers.rows.is_empty() {
         if data.providers.loading {
-            render_provider_loading_state(frame, chunks[1], theme);
+            render_provider_loading_state(frame, body, theme);
         } else {
-            render_provider_empty_state(frame, chunks[1], theme);
+            render_provider_empty_state(frame, body, theme);
         }
         return;
     }
@@ -241,7 +236,7 @@ pub(super) fn render_providers(
     let mut state = TableState::default();
     state.select(Some(app.provider_idx));
 
-    frame.render_stateful_widget(table, inset_left(chunks[1], CONTENT_INSET_LEFT), &mut state);
+    frame.render_stateful_widget(table, inset_left(body, CONTENT_INSET_LEFT), &mut state);
 }
 
 #[cfg(test)]

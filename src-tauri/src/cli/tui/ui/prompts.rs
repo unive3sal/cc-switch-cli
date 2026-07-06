@@ -39,31 +39,20 @@ pub(super) fn render_prompts(
         ])
     });
 
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(pane_border_style(app, Focus::Content, theme))
-        .title(format!(
+    let keys = crate::cli::tui::keymap::prompts::key_bar_items(app, data);
+    let body = render_page_frame(
+        frame,
+        area,
+        theme,
+        app,
+        &format!(
             "{} · {}",
             texts::menu_manage_prompts(),
             app.app_type.as_str()
-        ));
-    frame.render_widget(outer.clone(), area);
-    let inner = outer.inner(area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(3),
-            Constraint::Min(0),
-        ])
-        .split(inner);
-
-    let keys = crate::cli::tui::keymap::prompts::key_bar_items(app, data);
-    render_page_key_bar(frame, chunks[0], theme, &keys, app.focus == Focus::Content);
-
-    render_summary_bar(frame, chunks[1], theme, prompts_summary(data));
+        ),
+        &keys,
+        Some(prompts_summary(data)),
+    );
 
     let table = Table::new(
         rows,
@@ -81,7 +70,7 @@ pub(super) fn render_prompts(
     if data.prompts.rows.is_empty() {
         render_empty_state(
             frame,
-            chunks[2],
+            body,
             theme,
             texts::tui_prompts_empty_title(),
             texts::tui_prompts_empty_subtitle(),
@@ -92,7 +81,7 @@ pub(super) fn render_prompts(
 
     let mut state = TableState::default();
     state.select(Some(app.prompt_idx));
-    frame.render_stateful_widget(table, inset_left(chunks[2], CONTENT_INSET_LEFT), &mut state);
+    frame.render_stateful_widget(table, inset_left(body, CONTENT_INSET_LEFT), &mut state);
 }
 
 fn prompts_summary(data: &UiData) -> String {

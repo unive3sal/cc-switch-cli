@@ -64,26 +64,7 @@ pub(super) fn render_mcp(
         ])
     });
 
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(pane_border_style(app, Focus::Content, theme))
-        .title(format!(" {} ", texts::menu_manage_mcp()));
-    frame.render_widget(outer.clone(), area);
-    let inner = outer.inner(area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(3),
-            Constraint::Min(0),
-        ])
-        .split(inner);
-
     let keys = crate::cli::tui::keymap::mcp::key_bar_items(app, data);
-    render_page_key_bar(frame, chunks[0], theme, &keys, app.focus == Focus::Content);
-
     let summary = texts::tui_mcp_server_counts(
         data.mcp
             .rows
@@ -111,7 +92,15 @@ pub(super) fn render_mcp(
             .filter(|row| row.server.apps.hermes)
             .count(),
     );
-    render_summary_bar(frame, chunks[1], theme, summary);
+    let body = render_page_frame(
+        frame,
+        area,
+        theme,
+        app,
+        texts::menu_manage_mcp(),
+        &keys,
+        Some(summary),
+    );
 
     let table = Table::new(
         rows,
@@ -132,7 +121,7 @@ pub(super) fn render_mcp(
     if data.mcp.rows.is_empty() {
         render_empty_state(
             frame,
-            chunks[2],
+            body,
             theme,
             texts::tui_mcp_empty_title(),
             texts::tui_mcp_empty_subtitle(),
@@ -147,5 +136,5 @@ pub(super) fn render_mcp(
     let mut state = TableState::default();
     state.select(Some(app.mcp_idx));
 
-    frame.render_stateful_widget(table, inset_left(chunks[2], CONTENT_INSET_LEFT), &mut state);
+    frame.render_stateful_widget(table, inset_left(body, CONTENT_INSET_LEFT), &mut state);
 }

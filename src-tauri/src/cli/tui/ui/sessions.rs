@@ -21,46 +21,22 @@ pub(super) fn render_sessions(
         &app.sessions.deep_search_results,
     );
 
-    let outer = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(pane_border_style(app, Focus::Content, theme))
-        .title(format!(" {} ", texts::tui_sessions_title()));
-    frame.render_widget(outer.clone(), area);
-    let inner = outer.inner(area);
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(3),
-            Constraint::Min(0),
-        ])
-        .split(inner);
-
-    render_page_key_bar(
-        frame,
-        chunks[0],
-        theme,
-        &[
-            ("↑↓", texts::tui_key_select()),
-            ("←→/h/l", texts::tui_key_pane()),
-            ("Enter", texts::tui_key_view()),
-            ("R", texts::tui_key_restore()),
-            ("d", texts::tui_key_delete()),
-            ("r", texts::tui_key_refresh()),
-            (
-                "a",
-                if app.sessions.show_all_providers {
-                    texts::tui_key_sessions_all_active()
-                } else {
-                    texts::tui_key_sessions_all()
-                },
-            ),
-        ],
-        app.focus == Focus::Content,
-    );
-
+    let keys = [
+        ("↑↓", texts::tui_key_select()),
+        ("←→/h/l", texts::tui_key_pane()),
+        ("Enter", texts::tui_key_view()),
+        ("R", texts::tui_key_restore()),
+        ("d", texts::tui_key_delete()),
+        ("r", texts::tui_key_refresh()),
+        (
+            "a",
+            if app.sessions.show_all_providers {
+                texts::tui_key_sessions_all_active()
+            } else {
+                texts::tui_key_sessions_all()
+            },
+        ),
+    ];
     let summary = if app.sessions.loading && !app.sessions.loaded_once {
         texts::tui_sessions_loading_summary().to_string()
     } else if app.sessions.deep_search_active.is_some() {
@@ -76,12 +52,20 @@ pub(super) fn render_sessions(
     } else {
         texts::tui_sessions_summary(app.sessions.rows.len(), visible.len())
     };
-    render_summary_bar(frame, chunks[1], theme, summary);
+    let frame_body = render_page_frame(
+        frame,
+        area,
+        theme,
+        app,
+        texts::tui_sessions_title(),
+        &keys,
+        Some(summary),
+    );
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
-        .split(chunks[2]);
+        .split(frame_body);
 
     render_session_list(frame, app, &visible, body[0], theme);
     render_session_detail(frame, app, &visible, body[1], theme);
