@@ -1067,7 +1067,7 @@ pub(super) fn render_failover_queue_manager_overlay(
             ("↑↓", texts::tui_key_select()),
             ("f", crate::t!("enable/disable", "启用/禁用")),
             ("Space/Enter", texts::tui_key_toggle()),
-            ("</>/u/d", texts::tui_key_move()),
+            ("</>/K/J", texts::tui_key_move()),
             ("Esc", texts::tui_key_close()),
         ],
     );

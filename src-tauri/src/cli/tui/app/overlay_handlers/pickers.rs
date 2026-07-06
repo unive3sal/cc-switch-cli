@@ -1170,7 +1170,10 @@ impl App {
                 id: selected_row.id.clone(),
                 enabled: !selected_row.provider.in_failover_queue,
             },
-            KeyCode::Char('<') | KeyCode::Char('u') => {
+            // Reordering deliberately avoids lowercase `d`/`u`: `d` means
+            // delete on every list screen, and lowercase j/k are already
+            // vim-normalized into selection movement.
+            KeyCode::Char('<') | KeyCode::Char('K') => {
                 if selected_row.provider.in_failover_queue {
                     Action::ProviderMoveFailoverQueue {
                         id: selected_row.id.clone(),
@@ -1180,7 +1183,7 @@ impl App {
                     Action::None
                 }
             }
-            KeyCode::Char('>') | KeyCode::Char('d') => {
+            KeyCode::Char('>') | KeyCode::Char('J') => {
                 if selected_row.provider.in_failover_queue {
                     Action::ProviderMoveFailoverQueue {
                         id: selected_row.id.clone(),

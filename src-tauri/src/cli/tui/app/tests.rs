@@ -12717,6 +12717,47 @@ mod tests {
     }
 
     #[test]
+    fn failover_queue_manager_uses_shifted_jk_not_delete_key_for_moves() {
+        let mut app = App::new(Some(AppType::Codex));
+        app.overlay = Overlay::FailoverQueueManager { selected: 0 };
+
+        let mut data = UiData::default();
+        data.providers.rows.push(failover_provider_row(
+            "p1",
+            "Provider One",
+            json!({"model_provider":{"base_url":"https://example.com"}}),
+            true,
+            Some(1),
+        ));
+
+        // `d` means delete on every list screen; it must not silently
+        // reorder the failover queue (it used to move the entry down).
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('d')), &data),
+            Action::None
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('u')), &data),
+            Action::None
+        ));
+
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('J')), &data),
+            Action::ProviderMoveFailoverQueue {
+                direction: MoveDirection::Down,
+                ..
+            }
+        ));
+        assert!(matches!(
+            app.on_key(key(KeyCode::Char('K')), &data),
+            Action::ProviderMoveFailoverQueue {
+                direction: MoveDirection::Up,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn failover_queue_manager_esc_closes_overlay() {
         let mut app = App::new(Some(AppType::Claude));
         app.overlay = Overlay::FailoverQueueManager { selected: 0 };
