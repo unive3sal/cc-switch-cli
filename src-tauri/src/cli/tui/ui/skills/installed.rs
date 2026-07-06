@@ -24,20 +24,8 @@ pub(super) fn render_skills_installed(
         ])
         .split(inner);
 
-    render_page_key_bar(
-        frame,
-        chunks[0],
-        theme,
-        &[
-            ("Enter", texts::tui_key_details()),
-            ("Space", texts::tui_key_toggle()),
-            ("m", texts::tui_key_apps()),
-            ("f", texts::tui_key_discover()),
-            ("i", texts::tui_skills_action_import_existing()),
-            ("d", texts::tui_key_uninstall()),
-        ],
-        app.focus == Focus::Content,
-    );
+    let keys = crate::cli::tui::keymap::skills_installed::key_bar_items(app, data);
+    render_page_key_bar(frame, chunks[0], theme, &keys, app.focus == Focus::Content);
 
     render_summary_bar(frame, chunks[1], theme, installed_summary(data));
 

@@ -392,6 +392,85 @@ pub(crate) mod prompts {
     }
 }
 
+pub(crate) mod skills_installed {
+    use crossterm::event::KeyCode;
+
+    use super::Binding;
+    use crate::cli::i18n::texts;
+    use crate::cli::tui::app::{visible_skills_installed, App};
+    use crate::cli::tui::data::UiData;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Intent {
+        Details,
+        Toggle,
+        Apps,
+        Discover,
+        Import,
+        Uninstall,
+    }
+
+    pub(crate) const BINDINGS: &[Binding<Intent>] = &[
+        Binding {
+            display: "Enter",
+            keys: &[KeyCode::Enter],
+            intent: Intent::Details,
+            label: |_, _| texts::tui_key_details(),
+            shown: any_visible,
+        },
+        Binding {
+            display: "Space",
+            keys: &[KeyCode::Char(' ')],
+            intent: Intent::Toggle,
+            label: |_, _| texts::tui_key_toggle(),
+            shown: any_visible,
+        },
+        Binding {
+            display: "m",
+            keys: &[KeyCode::Char('m')],
+            intent: Intent::Apps,
+            label: |_, _| texts::tui_key_apps(),
+            shown: any_visible,
+        },
+        Binding {
+            display: "f",
+            keys: &[KeyCode::Char('f')],
+            intent: Intent::Discover,
+            label: |_, _| texts::tui_key_discover(),
+            shown: |_, _| true,
+        },
+        Binding {
+            display: "i",
+            keys: &[KeyCode::Char('i')],
+            intent: Intent::Import,
+            label: |_, _| texts::tui_skills_action_import_existing(),
+            shown: |_, _| true,
+        },
+        Binding {
+            display: "d",
+            keys: &[KeyCode::Char('d')],
+            intent: Intent::Uninstall,
+            label: |_, _| texts::tui_key_uninstall(),
+            shown: any_visible,
+        },
+    ];
+
+    pub(crate) fn intent_for(key: KeyCode) -> Option<Intent> {
+        super::intent_for(BINDINGS, key)
+    }
+
+    pub(crate) fn key_bar_items(app: &App, data: &UiData) -> Vec<(&'static str, &'static str)> {
+        super::key_bar_items(BINDINGS, app, data)
+    }
+
+    fn any_visible(app: &App, data: &UiData) -> bool {
+        visible_skills_installed(&app.filter, data)
+            .get(app.skills_idx)
+            .copied()
+            .is_some()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::providers::{self, Intent};

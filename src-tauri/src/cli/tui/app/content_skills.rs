@@ -18,20 +18,30 @@ impl App {
     }
 
     pub(crate) fn on_skills_installed_key(&mut self, key: KeyEvent, data: &UiData) -> Action {
+        use crate::cli::tui::keymap::skills_installed::Intent;
+
         let visible = visible_skills_installed(&self.filter, data);
 
         match key.code {
             KeyCode::Up => {
                 self.skills_idx = self.skills_idx.saturating_sub(1);
-                Action::None
+                return Action::None;
             }
             KeyCode::Down => {
                 if !visible.is_empty() {
                     self.skills_idx = (self.skills_idx + 1).min(visible.len() - 1);
                 }
-                Action::None
+                return Action::None;
             }
-            KeyCode::Enter => {
+            _ => {}
+        }
+
+        let Some(intent) = crate::cli::tui::keymap::skills_installed::intent_for(key.code) else {
+            return Action::None;
+        };
+
+        match intent {
+            Intent::Details => {
                 let Some(skill) = visible.get(self.skills_idx) else {
                     return Action::None;
                 };
@@ -39,7 +49,7 @@ impl App {
                     directory: skill.directory.clone(),
                 })
             }
-            KeyCode::Char(' ') => {
+            Intent::Toggle => {
                 let Some(skill) = visible.get(self.skills_idx) else {
                     return Action::None;
                 };
@@ -49,7 +59,7 @@ impl App {
                     enabled,
                 }
             }
-            KeyCode::Char('m') => {
+            Intent::Apps => {
                 let Some(skill) = visible.get(self.skills_idx) else {
                     return Action::None;
                 };
@@ -61,7 +71,7 @@ impl App {
                 };
                 Action::None
             }
-            KeyCode::Char('d') => {
+            Intent::Uninstall => {
                 let Some(skill) = visible.get(self.skills_idx) else {
                     return Action::None;
                 };
@@ -77,9 +87,8 @@ impl App {
                 });
                 Action::None
             }
-            KeyCode::Char('i') => Action::SkillsOpenImport,
-            KeyCode::Char('f') => self.push_route_and_switch(Route::SkillsDiscover),
-            _ => Action::None,
+            Intent::Import => Action::SkillsOpenImport,
+            Intent::Discover => self.push_route_and_switch(Route::SkillsDiscover),
         }
     }
 
