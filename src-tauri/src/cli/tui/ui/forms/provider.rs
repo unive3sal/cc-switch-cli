@@ -319,6 +319,7 @@ pub(crate) fn render_provider_add_form(
     ])
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
+    let table_area = fields_chunks[0];
     let rows = fields
         .iter()
         .zip(rows_data.iter())
@@ -332,7 +333,15 @@ pub(crate) fn render_provider_add_form(
                 ])
                 .style(Style::default().fg(theme.dim))
             } else {
-                Row::new(vec![Cell::from(cell_pad(label)), Cell::from(value.clone())])
+                Row::new(vec![
+                    Cell::from(cell_pad(label)),
+                    Cell::from(truncated_value_cell(
+                        value,
+                        table_area.width,
+                        label_col_width,
+                        theme,
+                    )),
+                ])
             }
         });
 
@@ -349,7 +358,6 @@ pub(crate) fn render_provider_add_form(
     if !fields.is_empty() {
         state.select(Some(provider.field_idx.min(fields.len() - 1)));
     }
-    let table_area = fields_chunks[0];
     let editor_area = fields_chunks[1];
     frame.render_stateful_widget(table, table_area, &mut state);
 
@@ -557,7 +565,15 @@ fn render_quick_config_form(
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
     let rows = rows_data.iter().map(|(label, value)| {
-        Row::new(vec![Cell::from(cell_pad(label)), Cell::from(value.clone())])
+        Row::new(vec![
+            Cell::from(cell_pad(label)),
+            Cell::from(truncated_value_cell(
+                value,
+                fields_inner.width,
+                label_col_width,
+                theme,
+            )),
+        ])
     });
 
     let table = Table::new(
@@ -669,7 +685,15 @@ fn render_codex_local_routing_form(
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
     let rows = rows_data.iter().map(|(label, value)| {
-        Row::new(vec![Cell::from(cell_pad(label)), Cell::from(value.clone())])
+        Row::new(vec![
+            Cell::from(cell_pad(label)),
+            Cell::from(truncated_value_cell(
+                value,
+                fields_inner.width,
+                label_col_width,
+                theme,
+            )),
+        ])
     });
 
     let table = Table::new(
@@ -998,7 +1022,15 @@ fn render_usage_query_form(
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
     let rows = rows_data.iter().map(|(label, value)| {
-        Row::new(vec![Cell::from(cell_pad(label)), Cell::from(value.clone())])
+        Row::new(vec![
+            Cell::from(cell_pad(label)),
+            Cell::from(truncated_value_cell(
+                value,
+                fields_inner.width,
+                label_col_width,
+                theme,
+            )),
+        ])
     });
 
     let table = Table::new(

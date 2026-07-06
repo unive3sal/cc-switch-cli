@@ -107,6 +107,24 @@ pub(super) fn truncate_to_display_width(text: &str, width: u16) -> String {
     out
 }
 
+/// Two-column field tables clip the value cell silently at the pane edge;
+/// pre-truncate the value with an ellipsis so a cut-off reads as one.
+pub(super) fn truncated_value_cell(
+    value: &str,
+    table_width: u16,
+    label_col_width: u16,
+    theme: &super::theme::Theme,
+) -> String {
+    let symbol_width = UnicodeWidthStr::width(highlight_symbol(theme)) as u16;
+    // Chrome left of the value column: label column + 1 column spacing +
+    // the selection highlight symbol.
+    let value_width = table_width
+        .saturating_sub(label_col_width)
+        .saturating_sub(1)
+        .saturating_sub(symbol_width);
+    truncate_to_display_width(value, value_width)
+}
+
 pub(super) fn format_sync_time_local_to_minute(ts: i64) -> Option<String> {
     Local
         .timestamp_opt(ts, 0)

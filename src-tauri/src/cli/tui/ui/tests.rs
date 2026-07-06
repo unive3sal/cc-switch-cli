@@ -4156,6 +4156,34 @@ fn help_text_shows_space_as_the_mcp_toggle_key() {
 }
 
 #[test]
+fn provider_form_truncates_overflowing_values_with_ellipsis() {
+    let _lock = lock_env();
+    let _lang = use_test_language(Language::English);
+    let _no_color = EnvGuard::remove("NO_COLOR");
+
+    let mut app = App::new(Some(AppType::Claude));
+    app.route = Route::Providers;
+    app.focus = Focus::Content;
+    app.form = Some(crate::cli::tui::form::FormState::ProviderAdd(
+        crate::cli::tui::form::ProviderAddFormState::new(AppType::Claude),
+    ));
+    let data = minimal_data(&app.app_type);
+
+    let buf = render(&app, &data);
+    let row = (0..buf.area.height)
+        .map(|y| line_at(&buf, y))
+        .find(|line| line.contains("Anthropic Messages"))
+        .expect("api format row should render");
+
+    // The value column is too narrow for the full label at 120 cols; it
+    // used to be cut dead ("…Messages (Nativ") with no truncation marker.
+    assert!(
+        row.contains('…'),
+        "cut-off value should end with an ellipsis: {row:?}"
+    );
+}
+
+#[test]
 fn key_bar_shows_more_hint_when_chips_overflow() {
     let _lock = lock_env();
     let _lang = use_test_language(Language::English);

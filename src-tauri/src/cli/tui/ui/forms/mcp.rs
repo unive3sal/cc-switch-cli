@@ -100,7 +100,15 @@ pub(crate) fn render_mcp_add_form(
     .style(Style::default().fg(theme.dim).add_modifier(Modifier::BOLD));
 
     let rows = rows_data.iter().map(|(label, value)| {
-        Row::new(vec![Cell::from(cell_pad(label)), Cell::from(value.clone())])
+        Row::new(vec![
+            Cell::from(cell_pad(label)),
+            Cell::from(truncated_value_cell(
+                value,
+                fields_inner.width,
+                label_col_width,
+                theme,
+            )),
+        ])
     });
 
     let table = Table::new(
